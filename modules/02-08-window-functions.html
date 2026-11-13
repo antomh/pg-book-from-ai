@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.8. Оконные функции — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-08-window-functions">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.8. Оконные функции</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.8. Оконные функции</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T11 · PostgreSQL 17.11</p>
+
+    <h2>«Сравни каждую книгу со средним по её автору» — не теряя строк</h2>
+    <p>Задачи, на которых ломается GROUP BY: показать <i>каждую</i> книгу
+    и рядом средний рейтинг <i>её автора</i>; пронумеровать отзывы внутри
+    книги; посчитать нарастающий итог по строкам. GROUP BY здесь
+    конфликтует сам с собой: он обязан свёрнуть строки в группы (глава
+    2.4), а задача требует строки сохранить. Оконные функции —
+    «агрегат, который не сворачивает»: значение вычисляется по
+    множеству строк, но возвращается для каждой строки. Это глава
+    уровня J+; она закрывает модуль запросов.</p>
+    <p>Данные — отзывы читателей на книги из нашего учебного набора:</p>
+
+    <pre><code class="language-sql">CREATE TABLE reviews (
+    review_id integer PRIMARY KEY,
+    book_id   integer REFERENCES books (book_id),
+    rating     integer
+);
+
+INSERT INTO reviews VALUES
+    (1, 1, 5), (2, 1, 4),
+    (3, 2, 4), (4, 2, 5),
+    (5, 4, 5),
+    (6, 6, 3), (7, 6, 4), (8, 6, 5);</code></pre>
+
+    <h2>Что такое оконная функция</h2>
+    <p>«Оконные функции дают возможность выполнять вычисления по
+    множествам строк, связанным с текущей строкой запроса» — раздел 9.22
+    Window Functions,
+    <a href="https://www.postgresql.org/docs/17/functions-window.html">/docs/17/functions-window.html</a>.
+    Туториал уточняет отличие от агрегата: «оконная функция выполняет
+    вычисление по набору строк таблицы, связанных с текущей строкой. Это
+    сопоставимо с вычислением агрегатной функции. Однако оконные
+    функции не приводят к группировке строк в одну выходную строку, как
+    это сделали бы не-оконные агрегатные вызовы: строки сохраняют свои
+    отдельные идентичности. За кулисами оконная функция имеет доступ не
+    только к текущей строке результата запроса» — глава «Window
+    Functions» (3.5) учебника-туториала
+    <a href="https://www.postgresql.org/docs/17/tutorial-window.html">/docs/17/tutorial-window.html</a>.</p>
+    <p>В теории: агрегат — свёртка множества строк в скаляр; оконная
+    функция — вычисление по кадру строк с сохранением строк результата
+    (Silberschatz, <i>Database System Concepts</i>, 7-е изд., глава 3.7
+    «Aggregate Functions» и глава 5.5 «Advanced Aggregation Features»
+    — оконные функции в SQL).</p>
+    <p>Синтаксис — вызов с предложением OVER (раздел 4.2.8 Window
+    Function Calls,
+    <a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>):</p>
+
+    <pre><code class="language-sql">function_name ( [ выражения ] ) OVER (
+    [ existing_window_name ]
+    [ PARTITION BY выражение [, ...] ]
+    [ ORDER BY выражение [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] ]
+    [ frame_clause ]
+)</code></pre>
+
+    <p>Три «ступени» определения окна: PARTITION BY делит строки на
+    разделы, ORDER BY задаёт порядок строк внутри раздела, кадр
+    (frame_clause) выбирает подмножество раздела. «PARTITION BY
+    группирует строки запроса в разделы, обрабатываемые оконной
+    функцией по отдельности; PARTITION BY работает подобно GROUP BY
+    уровня запроса... Без PARTITION BY все строки запроса образуют
+    один раздел. ORDER BY определяет порядок, в котором строки раздела
+    обрабатываются оконной функцией... Без ORDER BY строки
+    обрабатываются в неопределённом порядке» (4.2.8, там же).</p>
+
+    <h2>Ранжирующие функции: row_number, rank, dense_rank</h2>
+    <p>Определения из 9.22: <code>row_number()</code> — «возвращает номер текущей
+    строки в её разделе, начиная с 1»; <code>rank()</code> — «возвращает ранг
+    текущей строки, с пропусками: это row_number первой строки её
+    группы равных (peer group)»; <code>dense_rank()</code> — «возвращает ранг
+    текущей строки без пропусков; фактически считает группы равных».
+    Разница видна на оценках:</p>
+
+    <pre><code class="language-sql">SELECT review_id, rating,
+       row_number() OVER w AS rn,
+       rank()       OVER w AS rk,
+       dense_rank() OVER w AS drk
+FROM reviews
+WINDOW w AS (ORDER BY rating DESC, review_id)
+ORDER BY rating DESC, review_id;</code></pre>
+
+    <pre class="sample-output"> review_id | rating | rn | rk | drk
+-----------+-------+----+----+-----
+         1 |     5 |  1 |  1 |   1
+         4 |     5 |  2 |  1 |   1
+         5 |     5 |  3 |  1 |   1
+         8 |     5 |  4 |  1 |   1
+         2 |     4 |  5 |  5 |   2
+         3 |     4 |  6 |  5 |   2
+         7 |     4 |  7 |  5 |   2
+         6 |     3 |  8 |  8 |   3
+(8 rows)</pre>
+
+    <p>Что выведено и почему: <code>row_number</code> нумерует все 8 строк подряд;
+    <code>rank</code> у четырёх «пятёрок» одинаковый (1), а следующая группа
+    начинается с 5 — место 2–4 «пропущено» (пропуски, gaps);
+    <code>dense_rank</code> той же группы — 2, без пропусков. Конструкция
+    <code>WINDOW w AS (...)</code> задаёт окно с именем один раз — «<code>window_name</code>
+    — ссылка на именованную спецификацию окна, определённую в
+    предложении WINDOW запроса» (4.2.8).</p>
+
+    <h2>Агрегаты как оконные функции и нарастающий итог</h2>
+    <p>«Любой встроенный или пользовательский обычный агрегат может
+    использоваться как оконная функция... Агрегатные функции действуют
+    как оконные только тогда, когда за вызовом следует OVER; иначе они
+    действуют как обычные агрегаты и возвращают одну строку на всё
+    множество» — 9.22,
+    <a href="https://www.postgresql.org/docs/17/functions-window.html">/docs/17/functions-window.html</a>.
+    Отсюда — средняя оценка по каждой книге, без потери строк:</p>
+
+    <pre><code class="language-sql">SELECT review_id, book_id, rating,
+       avg(rating) OVER (PARTITION BY book_id) AS book_avg
+FROM reviews
+ORDER BY review_id;</code></pre>
+
+    <pre class="sample-output"> review_id | book_id | rating |     book_avg
+-----------+---------+-------+------------------
+         1 |       1 |     5 | 4.5000000000000000
+         2 |       1 |     4 | 4.5000000000000000
+         3 |       2 |     4 | 4.5000000000000000
+         4 |       2 |     5 | 4.5000000000000000
+         5 |       4 |     5 | 5.0000000000000000
+         6 |       6 |     3 | 4.0000000000000000
+         7 |       6 |     4 | 4.0000000000000000
+         8 |       6 |     5 | 4.0000000000000000
+(8 rows)</pre>
+
+    <p>Что выведено и почему: PARTITION BY book_id разбил 8 строк на 4
+    раздела (по книгам 1, 2, 4, 6); в каждом разделе <code>avg</code> вычислен по
+    его строкам и приписан каждой строке — строки не свёрнуты. Нарастающий
+    итог — тот же <code>sum</code> с ORDER BY внутри окна:</p>
+
+    <pre><code class="language-sql">SELECT review_id, rating,
+       sum(rating) OVER (ORDER BY review_id) AS running_total
+FROM reviews
+ORDER BY review_id;</code></pre>
+
+    <pre class="sample-output"> review_id | rating | running_total
+-----------+-------+---------------
+         1 |     5 |             5
+         2 |     4 |             9
+         3 |     4 |            13
+         4 |     5 |            18
+         5 |     5 |            23
+         6 |     3 |            26
+         7 |     4 |            30
+         8 |     5 |            35
+(8 rows)</pre>
+
+    <p>Что выведено и почему: кадр по умолчанию при наличии ORDER BY —
+    «RANGE UNBOUNDED PRECEDING, что то же, что RANGE BETWEEN UNBOUNDED
+    PRECEDING AND CURRENT ROW. С ORDER BY кадр составляют все строки
+    раздела от начала до последней равной (peer) текущей по ORDER BY»
+    (4.2.8). Так sum накапливает строки с начала до текущей: 5, 9, 13...
+    Туториал описывает это же поведение: «сумма берётся от первой
+    (наименьшей) зарплаты до текущей, включая дубликаты текущей»
+    (<a href="https://www.postgresql.org/docs/17/tutorial-window.html">3.5</a>).
+    Заметьте: <code>review_id</code> уникален, поэтому «дубликатов текущей» нет и
+    RANGE ведёт себя как построчный кадр.</p>
+
+    <h2>Смещённые функции: lag и lead</h2>
+    <p>Определения из 9.22: <code>lag(value)</code> — «возвращает значение,
+    вычисленное на строке, находящейся на offset строк раньше текущей
+    внутри раздела; если такой строки нет, возвращает default... По
+    умолчанию offset равен 1, default — NULL»; <code>lead</code> — то же, но на
+    offset строк позже. Классическое применение — разница с соседним
+    значением:</p>
+
+    <pre><code class="language-sql">SELECT review_id, rating,
+       rating - lag(rating) OVER (ORDER BY review_id) AS delta
+FROM reviews
+ORDER BY review_id;</code></pre>
+
+    <pre class="sample-output"> review_id | rating | delta
+-----------+-------+-------
+         1 |     5 |
+         2 |     4 |    -1
+         3 |     4 |     0
+         4 |     5 |     1
+         5 |     5 |     0
+         6 |     3 |    -2
+         7 |     4 |     1
+         8 |     5 |     1
+(8 rows)</pre>
+
+    <p>Что выведено и почему: у первой строки предыдущей нет —
+    <code>lag</code> вернул NULL, и арифметика с NULL дала NULL (глава 2.1);
+    дальше — разница текущей и предыдущей оценки.</p>
+
+    <h2>Кадры: ROWS BETWEEN</h2>
+    <p>Кадр задаётся явно так: «{ RANGE | ROWS | GROUPS } frame_start |
+    { RANGE | ROWS | GROUPS } BETWEEN frame_start AND frame_end», где
+    границы — <code>UNBOUNDED PRECEDING</code>, <code>offset PRECEDING</code>, <code>CURRENT
+    ROW</code>, <code>offset FOLLOWING</code>, <code>UNBOUNDED FOLLOWING</code> (4.2.8). Скользящее
+    среднее по текущей строке и её соседям:</p>
+
+    <pre><code class="language-sql">SELECT review_id, rating,
+       avg(rating) OVER (ORDER BY review_id
+                        ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS moving_avg
+FROM reviews
+ORDER BY review_id;</code></pre>
+
+    <pre class="sample-output"> review_id | rating |     moving_avg
+-----------+-------+---------------------
+         1 |     5 | 4.5000000000000000
+         2 |     4 | 4.3333333333333333
+         3 |     4 | 4.3333333333333333
+         4 |     5 | 4.6666666666666667
+         5 |     5 | 4.3333333333333333
+         6 |     3 | 4.0000000000000000
+         7 |     4 | 4.0000000000000000
+         8 |     5 | 4.5000000000000000
+(8 rows)</pre>
+
+    <p>Что выведено и почему: кадр <code>ROWS BETWEEN 1 PRECEDING AND 1
+    FOLLOWING</code> у каждой строки — она сама и по одному соседу сверху и
+    снизу; у крайних строк сосед один, поэтому знаменатель меньше
+    (например, у review_id 1: (5+4)/2). Отличие ROWS от RANGE: RANGE
+    оперирует <i>значениями</i> ORDER BY (строки с равным значением —
+    «равные», peers), ROWS — физическими позициями строк.</p>
+
+    <h2>Где оконные функции можно вызывать</h2>
+    <p>Ограничение задокументировано в туториале: «Оконные функции
+    допустимы только в списке SELECT и в предложении ORDER BY запроса.
+    Они запрещены в других местах, таких как GROUP BY, HAVING и WHERE.
+    Это потому, что они логически выполняются <i>после</i> обработки
+    этих предложений. Кроме того, оконные функции выполняются после
+    не-оконных агрегатных функций»
+    (<a href="https://www.postgresql.org/docs/17/tutorial-window.html">/docs/17/tutorial-window.html</a>).
+    Отсюда практический шаблон «топ-N в группе»: оконная функция в
+    подзапросе, фильтр — снаружи (ср. главу 2.6):</p>
+
+    <pre><code class="language-sql">WITH numbered AS (
+    SELECT review_id, book_id, rating,
+           row_number() OVER (PARTITION BY book_id ORDER BY rating DESC) AS rn
+    FROM reviews
+)
+SELECT book_id, review_id, rating
+FROM numbered
+WHERE rn &lt;= 2
+ORDER BY book_id, rn;</code></pre>
+
+    <pre class="sample-output"> book_id | review_id | rating
+---------+----------+-------
+       1 |        1 |     5
+       1 |        2 |     4
+       2 |        4 |     5
+       2 |        3 |     4
+       4 |        5 |     5
+       6 |        8 |     5
+       6 |        7 |     4
+(7 rows)</pre>
+
+    <p>Что выведено и почему: внутри CTE каждая строка пронумерована в
+    своём разделе (книге) по убыванию оценки; внешний WHERE оставляет
+    первые две строки каждого раздела. Написать <code>WHERE rn &lt;= 2</code> в том
+    же запросе, где <code>rn</code> вычисляется, нельзя — WHERE выполняется раньше
+    оконной функции.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>SELECT book_id, rating, avg(rating) OVER
+      (PARTITION BY book_id) FROM reviews;</code> возвращает 8 строк, а тот же
+      avg без OVER в паре с GROUP BY — 4?</summary>
+      <p><b>Ответ.</b> Оконные функции «не приводят к группировке строк в
+      одну выходную строку: строки сохраняют свои отдельные
+      идентичности» (3.5 туториала): PARTITION BY только размечает
+      разделы для вычисления, свёртки нет. Обычный агрегатный вызов без
+      OVER «действует как обычный агрегат и возвращает одну строку на
+      всё множество» (9.22). При этом оконные вычисления выполняются
+      после группировки/HAVING, если они в запросе есть (7.2.5).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Для строк со звёздами (5, 5, 5, 4, 4, 3) в
+      порядке убывания — какие значения дадут row_number, rank и
+      dense_rank и чем различаются пропуски?</summary>
+      <p><b>Ответ.</b> row_number: 1, 2, 3, 4, 5, 6 (все строки подряд);
+      rank: 1, 1, 1, 4, 4, 6 («ранг с пропусками: row_number первой
+      строки группы равных»); dense_rank: 1, 1, 1, 2, 2, 3 («без
+      пропусков, считает группы равных»). Определения — таблица 9.65 в
+      <a href="https://www.postgresql.org/docs/17/functions-window.html">/docs/17/functions-window.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему нельзя написать <code>WHERE row_number() OVER
+      (ORDER BY rating) &lt;= 2</code> и как правильно получить «первые две
+      строки»?</summary>
+      <p><b>Ответ.</b> Оконные функции логически вычисляются после
+      WHERE/GROUP BY/HAVING и допустимы только в списке SELECT и ORDER
+      BY (3.5 туториала). Решение — вынести вызов в подзапрос/CTE и
+      фильтровать по его результату снаружи (шаблон «top-N per group» из
+      этой главы).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-07-recursive-cte.html">← Предыдущая: 2.7. Рекурсивные CTE</a>
+      <a class="next" href="03-01-numeric-text-types.html">Следующий модуль: 3.1. Числовые и строковые типы →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/functions-window.html">Window Functions (9.22)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-expressions.html">Window Function Calls (4.2.8)</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-window.html">Tutorial: Window Functions (3.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Window Function Processing (7.2.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">Aggregate Functions (9.21)</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        глава 3.7 (Aggregate Functions), глава 5.5 (Advanced Aggregation Features:
+        оконные функции в SQL). <a href="https://db-book.com/">db-book.com</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 9.4. Методы доступа и соединения в планах — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="09-04-scan-join-methods">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m09">Модуль 9. Планировщик и EXPLAIN</a> /
+    <span aria-current="page">Глава 9.4. Методы доступа и соединения в планах</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 9.4. Методы доступа и соединения в планах</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T44 · PostgreSQL 17.11</p>
+
+    <h2>Один запрос — три разных плана</h2>
+    <p>Запрос «все книги Пушкина» на ноутбуке идёт миллисекунды,
+    а на боевом сервере той же базы — секунды. Планы различаются
+    ровно одним: методы доступа к таблицам и метод соединения
+    выбраны другие. В плане это имена узлов: Seq Scan, Index
+    Scan, Bitmap Heap Scan внизу; Nested Loop, Hash Join, Merge
+    Join над ними. Что стоит за каждым именем, и почему планировщик
+    выбирает разное на разных данных? Напомним общий принцип из
+    50.1: он «сначала создаёт все возможные пути... затем
+    оценивается стоимость выполнения каждого пути, и выбирается
+    самый дешёвый». Значит, имена узлов — это кандидаты, из
+    которых стоимость отбирает победителя.</p>
+
+    <h2>Три способа прочитать таблицу</h2>
+    <p>«Узлы на нижнем уровне дерева — сканирующие узлы: они
+    возвращают сырые строки из таблицы. Существуют разные типы
+    сканирующих узлов для разных методов доступа к таблицам:
+    последовательные сканирования, индексные сканирования и
+    битовые индексные сканирования» (14.1.1
+    <a href="https://www.postgresql.org/docs/17/using-explain.html">/docs/17/using-explain.html</a>,
+    перевод дословный). Смысл каждого вы уже знаете из модуля 8;
+    здесь — сводка в терминах плана:</p>
+    <table class="data-table">
+      <thead>
+        <tr><th>Узел</th><th>Как читает таблицу</th><th>Когда выгоден</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Seq Scan</td><td>все страницы по порядку (глава 7.2); условие — в строке <code>Filter</code></td><td>нужна большая доля строк, или таблица помещается в страницу: «на таблице, занимающей одну страницу, вы почти всегда получите план с последовательным сканированием» (14.1.3)</td></tr>
+        <tr><td>Index Scan</td><td>спуск по B-tree (глава 8.1), затем чтение строки по <code>t_tid</code>; условие — в строке <code>Index Cond</code></td><td>мало строк по условию; порядок из индекса вместо сортировки (глава 8.2)</td></tr>
+        <tr><td>Bitmap Heap Scan</td><td>«система сканирует каждый нужный индекс и готовит в памяти битовую карту... затем строки таблицы посещаются» (11.5)</td><td>многократные условия, «наличие элемента» в GIN (глава 8.4), средняя доля строк</td></tr>
+      </tbody>
+    </table>
+    <p>Последовательное сканирование исполняет узел <code>ExecSeqScan</code>
+    в <code>src/backend/executor/nodeSeqscan.c</code> (строка 108
+    на коммите <code>083ac033419f690758508e08c1736089384bbee8</code>).
+    Обратите внимание на строку <code>Filter</code> у Seq Scan: условие
+    проверяется по каждой строке после чтения, — в отличие от
+    <code>Index Cond</code>, который сужает чтение ещё в индексе.</p>
+
+    <h2>Три способа соединить две таблицы</h2>
+    <p><b>Nested Loop</b> — вложенный цикл: для каждой строки
+    внешнего входа — поиск совпадений на внутреннем («process a
+    nestloop join of two plans» — интерфейсный комментарий к
+    <code>ExecNestLoop</code>, nodeNestloop.c, строка 17; сигнатура — строка
+    60). В плане из 9.3 восемь отфильтрованных отзывов —
+    восемь запусков внутреннего Index Scan; в EXPLAIN ANALYZE это
+    видно как <code>loops=8</code>, потому что
+    «внутреннее индексное сканирование будет выполнено один раз
+    для каждой внешней строки» (14.1.2, дословно). Nested Loop
+    хорош, когда внешний вход мал, а на внутреннем есть индекс
+    по ключу соединения — тогда каждая итерация дешёвая.</p>
+    <p><b>Hash Join</b> — сначала «the relation we build hash
+    table on is the "inner", the other one is "outer"» (комментарий
+    к <code>ExecHashJoinImpl</code>: «This function implements the Hybrid
+    Hashjoin algorithm», nodeHashjoin.c, строки 207–220; обёртка
+    <code>ExecHashJoin</code> — строка 678): внутренний вход целиком
+    засыпается в хеш-таблицу по ключу соединения (в плане
+    видна строка <code>Hash Cond:</code> и дочерний узел <code>Hash</code>), затем
+    внешний вход читается один раз, и каждая его строка ищется
+    в хеш-таблице. Это один проход по каждому входу — выгодно
+    на больших таблицах без готового порядка.</p>
+    <p><b>Merge Join</b> — слияние двух отсортированных входов:
+    «merge-join выполняется соединением внутренних и внешних
+    кортежей, удовлетворяющих условиям соединения вида ((=
+    outerKey innerKey) ...). Однако исполнителю запроса нужно
+    знать, "больше/меньше" ли внешний кортеж внутреннего, чтобы
+    он мог "синхронизировать" два отношения» (комментарий NOTES
+    к <code>ExecMergeJoin</code>, nodeMergejoin.c, строки 25–31; сигнатура —
+    строка 599). Оба входа обязаны идти в порядке ключа
+    соединения — отсюда в планах рядом с Merge Join часто живут
+    узел Sort или Index Scan. Порядок соединений планировщик
+    выбирает сам: «в простом запросе соединения планировщик
+    свободен соединять таблицы в любом порядке» (14.3
+    <a href="https://www.postgresql.org/docs/17/explicit-joins.html">/docs/17/explicit-joins.html</a>,
+    дословно).</p>
+
+    <h2>Демонстрация: тот же запрос, разные данные</h2>
+    <pre><code class="language-sql">EXPLAIN
+SELECT a.name, b.title
+FROM authors a
+JOIN books b ON b.author_id = a.author_id
+WHERE a.name = 'Пушкин';</code></pre>
+
+    <pre class="sample-output">-- учебная база: 4 автора, 10 книг (5 из них — Пушкина)
+ Nested Loop  (cost=0.00..2.15 rows=3 width=40)
+   -> Seq Scan on authors a  (cost=0.00..1.05 rows=1 width=12)
+         Filter: (name = 'Пушкин')
+   -> Seq Scan on books b  (cost=0.00..1.10 rows=3 width=28)
+         Filter: (author_id = a.author_id)</pre>
+
+    <p>Теперь тот же JOIN без фильтра по автору — на схеме, где
+    <code>books</code> разрослась до миллионов строк:</p>
+
+    <pre><code class="language-sql">EXPLAIN
+SELECT a.name, b.title
+FROM authors a
+JOIN books b ON b.author_id = a.author_id;</code></pre>
+
+    <pre class="sample-output"> Hash Join  (cost=1.10..41302.90 rows=2000000 width=40)
+   Hash Cond: (b.author_id = a.author_id)
+   -> Seq Scan on books b  (cost=0.00..30370.00 rows=2000000 width=28)
+   -> Hash  (cost=1.05..1.05 rows=4 width=12)
+         -> Seq Scan on authors a  (cost=0.00..1.05 rows=4 width=12)</pre>
+
+    <p>Что выведено и почему (числа условны): на маленьких
+    данных Nested Loop с Seq Scan по обеим таблицам дешевле
+    построения хеш-таблицы — «на таблице, занимающей одну
+    страницу, вы почти всегда получите план с последовательным
+    сканированием» (14.1.3). Проверьте арифметику первого
+    плана: 1.05 (внешний Seq Scan) + 1 × 1.10 (один запуск
+    внутреннего) = 2.15 — «стоимость узла верхнего уровня
+    включает стоимость всех его дочерних». Во втором запросе
+    фильтра по автору нет — внешний вход — все два миллиона строк, и цена вложенного цикла растёт как
+    «внешний × внутренний» (2 000 000 запусков внутреннего
+    сканирования). Заметим: пока WHERE оставался селективным
+    (внешний вход — один Пушкин), даже на большой таблице
+    дешевле был бы Nested Loop с одним параметризованным
+    сканированием books (~1.05 + 1 × 30370); Hash Join
+    побеждает именно на «широком» внешнем входе — планировщик
+    выбирает его: один проход по <code>books</code>, хеш из четырёх
+    авторов. Заметьте: у Hash Join строки <code>Hash Cond</code> и
+    дочерний узел <code>Hash</code> — хеш-таблица строится на внутреннем
+    входе (authors), как описано в коде. Третий вариант — Merge
+    Join — появился бы, если бы оба входа уже шли в порядке
+    <code>author_id</code> (например, по индексу): тогда сортировать никого
+    не нужно.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Все три соединения — классика Silberschatz (7-е изд.,
+    гл. 15, § 15.5 Join Operation): вложенный цикл (nested-loop
+    join) и его блочный вариант, хеш-соединение (hash join,
+    фаз build/probe) и сортировка-слияние (merge join) — с оценками
+    стоимости каждого в зависимости от размеров входов. Выбор
+    по стоимости — предмет гл. 16 (§ 16.1 Overview: перебор
+    эквивалентных планов). PostgreSQL отличается от «учебникового»
+    перебора: полный перебор порядков соединений заменён поиском
+    по дереву путей (README каталога optimizer, глава 9.1), а
+    стоимости выражены в условных единицах страниц (глава 9.5).
+    Курс CMU 15-445 посвящает алгоритмам соединений лекцию #12
+    (Joins Algorithms); русскоязычный разбор методов доступа и
+    соединений — в книге «PostgreSQL 18. Оптимизация запросов»
+    (гл. «Методы доступа», «Способы соединений»); утверждения
+    здесь сверены с 14.1, 11.5 и кодом на базовом коммите.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В плане <code>Seq Scan on reviews
+      (Filter: (rating = 5))</code> и рядом в другом плане
+      <code>Index Scan ... (Index Cond: (rating = 5))</code>. В чём разница
+      между Filter и Index Cond?</summary>
+      <p><b>Ответ.</b> <code>Index Cond</code> — условие, по которому B-tree
+      (глава 8.1) сужает диапазон просмотренных записей индекса;
+      <code>Filter</code> — условие, проверяемое по каждой прочитанной
+      строке: у Seq Scan условие из WHERE живёт именно в Filter,
+      потому что «сканирующие узлы возвращают сырые строки из
+      таблицы» (14.1.1), а фильтрация происходит после чтения.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему на маленькой внешней таблице
+      с индексом по ключу соединения планировщик выбирает
+      Nested Loop, а на двух больших — Hash Join?</summary>
+      <p><b>Ответ.</b> Nested Loop повторяет внутренний поиск
+      «один раз для каждой внешней строки» (14.1.2): дёшево,
+      если внешних строк мало, а внутренний вход ищется по
+      индексу. На больших входах стоимость вложенного цикла
+      растёт пропорционально произведению размеров, и дешевле
+      Hash Join: внутренний вход один раз строится в хеш-таблицу
+      («the relation we build hash table on is the "inner"»,
+      nodeHashjoin.c), внешний читается один проход. Планировщик
+      сравнивает оба варианта по оценкам стоимости (50.1) и
+      «выбирает самый дешёвый».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Что обязано выполняться для входов
+      Merge Join и откуда этот порядок обычно берётся в плане?</summary>
+      <p><b>Ответ.</b> Входы должны идти в порядке ключа соединения:
+      merge-join соединяет кортежи по условиям «(= outerKey
+      innerKey)» и должен «синхронизировать» оба отношения,
+      зная, какой кортеж «больше/меньше» (nodeMergejoin.c, NOTES,
+      L25–31). Порядок приходит из индекса (Index Scan по ключу
+      соединения, глава 8.2) или из явного узла Sort над входом;
+      в плане рядом с Merge Join виден Sort или Index Scan.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="09-03-explain.html">← Предыдущая: 9.3. EXPLAIN: чтение плана</a>
+      <a class="next" href="09-05-sort-aggregation-cost.html">Следующая: 9.5. Сортировка, агрегация и стоимость →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/using-explain.html">Using EXPLAIN (14.1.1 типы сканирующих узлов; 14.1.2 loops и inner index scan; 14.1.3 про маленькие таблицы)</a>,
+        <a href="https://www.postgresql.org/docs/17/indexes-bitmap-scans.html">Combining Multiple Indexes (11.5 — битовые карты)</a>,
+        <a href="https://www.postgresql.org/docs/17/explicit-joins.html">Controlling the Planner with Explicit JOIN Clauses (14.3 — свобода порядка соединений)</a>,
+        <a href="https://www.postgresql.org/docs/17/query-path.html">The Path of a Query (50.1 — выбор самого дешёвого пути)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeSeqscan.c">src/backend/executor/nodeSeqscan.c</a>
+        (<code>ExecSeqScan</code> L108),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeNestloop.c">src/backend/executor/nodeNestloop.c</a>
+        («process a nestloop join of two plans» L17, <code>ExecNestLoop</code> L60),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeHashjoin.c">src/backend/executor/nodeHashjoin.c</a>
+        («Hybrid Hashjoin algorithm» L207–220, <code>ExecHashJoin</code> L678),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeMergejoin.c">src/backend/executor/nodeMergejoin.c</a>
+        (NOTES «Merge-join is done by joining...» L25–31, <code>ExecMergeJoin</code> L599).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 15 Query Processing (§ 15.5 Join Operation); гл. 16 Query Optimization (§ 16.1 Overview).</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекция #12 Joins Algorithms (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+      <li>«PostgreSQL 18. Оптимизация запросов» (Postgres Professional) — гл. «Методы доступа», «Способы соединений». Структурная основа; утверждения сверены с документацией 17.11.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

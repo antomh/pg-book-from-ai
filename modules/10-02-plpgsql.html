@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 10.2. PL/pgSQL: логика на сервере — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="10-02-plpgsql">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m10">Модуль 10. Серверное программирование</a> /
+    <span aria-current="page">Глава 10.2. PL/pgSQL: логика на сервере</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 10.2. PL/pgSQL: логика на сервере</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T47 · PostgreSQL 17.11</p>
+
+    <h2>IF, которого нет в SQL</h2>
+    <p>Функция из главы 10.1 умеет только выполнять запросы.
+    Но правилу «читатель голосует за книгу — если уже голосовал,
+    оценка обновляется, иначе вставляется новый отзыв» нужен
+    if/else: SQL-функция такое тело выразить не может. Можно,
+    конечно, проверить наличие строки в приложении — но тогда
+    между SELECT и INSERT пройдёт время, и два параллельных
+    запроса вставят два отзыва (гонка, о которой глава 6.6).
+    Решение — языки с управляющими конструкциями, работающие
+    внутри сервера. В PostgreSQL это прежде всего PL/pgSQL.</p>
+
+    <h2>Что это за язык</h2>
+    <p>Из 41.1 Overview
+    (<a href="https://www.postgresql.org/docs/17/plpgsql-overview.html">/docs/17/plpgsql-overview.html</a>,
+    перевод дословный): «PL/pgSQL — загружаемый процедурный
+    язык для системы баз данных PostgreSQL. Целями проектирования
+    PL/pgSQL были создание загружаемого процедурного языка,
+    который можно использовать для создания функций, процедур
+    и триггеров, добавляет управляющие конструкции к языку SQL,
+    может выполнять сложные вычисления, наследует все
+    пользовательские типы, функции, процедуры и операторы...
+    В PostgreSQL 9.0 и более поздних PL/pgSQL установлен по
+    умолчанию». Зачем он нужен, там же: «С PL/pgSQL вы можете
+    сгруппировать блок вычислений и серию запросов внутри
+    сервера баз данных, получив мощь процедурного языка и
+    простоту использования SQL, но со значительной экономией
+    накладных расходов на обмены клиент/сервер». Пометка:
+    PL/pgSQL — диалект PostgreSQL; в стандарте SQL процедурный
+    язык называется SQL/PSM, и PostgreSQL его не реализует.</p>
+    <p>Структура функции — 41.2 Structure of PL/pgSQL
+    (<a href="https://www.postgresql.org/docs/17/plpgsql-structure.html">/docs/17/plpgsql-structure.html</a>):
+    тело — блок из секций объявления и операторов; переменные
+    объявляются в DECLARE. Пишем нашу функцию:</p>
+
+    <pre><code class="language-sql">CREATE FUNCTION rate_book(p_reader_id int, p_book_id int,
+                          p_rating int)
+RETURNS int
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_review_id reviews.review_id%TYPE;
+BEGIN
+    SELECT review_id INTO v_review_id
+    FROM reviews
+    WHERE reader_id = p_reader_id
+      AND book_id   = p_book_id;
+
+    IF FOUND THEN
+        UPDATE reviews
+        SET rating = p_rating
+        WHERE review_id = v_review_id;
+    ELSE
+        INSERT INTO reviews (reader_id, book_id, rating)
+        VALUES (p_reader_id, p_book_id, p_rating)
+        RETURNING review_id INTO v_review_id;
+    END IF;
+
+    RETURN v_review_id;
+END;
+$$;</code></pre>
+
+    <p>Разбор по элементам языка. <code>reviews.review_id%TYPE</code> —
+    «%TYPE предоставляет тип данных колонки таблицы или ранее
+    объявленной переменной PL/pgSQL» (41.3.3 Copying Types,
+    <a href="https://www.postgresql.org/docs/17/plpgsql-declarations.html">/docs/17/plpgsql-declarations.html</a>):
+    тип переменной берётся от колонки, а не дублируется
+    вручную.
+    <code>SELECT ... INTO</code> — 41.5.3 Executing a Command with a
+    Single-Row Result
+    (<a href="https://www.postgresql.org/docs/17/plpgsql-statements.html">/docs/17/plpgsql-statements.html</a>):
+    «результат SQL-команды, возвращающей одну строку...
+    может быть присвоен переменной... SELECT select_expressions
+    INTO [STRICT] target FROM ...». <code>IF</code> — 41.6.4: «IF и CASE
+    позволяют выполнять альтернативные команды на основе
+    условий... PL/pgSQL имеет три формы IF» — здесь вторая,
+    с ELSE. <code>RETURNING ... INTO</code> переиспользует тот же механизм
+    41.5.3. <code>FOUND</code> — специальная переменная состояния из
+    41.5.5: «оператор SELECT INTO устанавливает FOUND в true,
+    если строка назначена, и в false, если строка не возвращена»;
+    там же про вторую ветку: «UPDATE, INSERT, DELETE и MERGE
+    устанавливают FOUND в true, если затронута хотя бы одна
+    строка».</p>
+
+    <pre><code class="language-sql">SELECT rate_book(2, 13, 5);
+SELECT rate_book(2, 13, 1);</code></pre>
+
+    <pre class="sample-output"> rate_book
+-----------
+        11
+(1 row)
+
+ rate_book
+-----------
+        11
+(1 row)</pre>
+
+    <p>Что выведено и почему: номер 11 не случаен — отзывы
+    1–10 накопились в главах 2.8 и 4.4, спам 11–12 из 5.2
+    удалён, и identity-последовательность, перезапущенная
+    в 4.4 на 11, выдаёт первый свободный номер. Первый вызов
+    не нашёл отзыва читателя 2 (Ивана из главы 4.4)
+    о книге 13 «Пиковая дама» — <code>FOUND</code> = false, сработала
+    ветка INSERT без явного <code>review_id</code> (столбец —
+    <code>GENERATED BY DEFAULT AS IDENTITY</code> с главы 4.4),
+    вернулся <code>review_id</code> новой строки. Второй вызов нашёл ту же
+    строку — сработал UPDATE, вернулся тот же идентификатор:
+    голос «обновился», второй строки не появилось. Заметьте:
+    честная альтернатива для этого частного случая — один
+    оператор <code>INSERT ... ON CONFLICT ... DO UPDATE</code> из главы
+    5.1, без всякого PL/pgSQL. Функция оправдана, когда логика
+    действительно ветвистая: проверки бизнес-правил, разные
+    коды результата, работа с несколькими таблицами. Это
+    принципиальная граница применимости: данные обрабатываются
+    по возможности в SQL, а не в цикле (см. ниже).</p>
+
+    <h2>Циклы и граница применимости</h2>
+    <p>«С помощью операторов LOOP, EXIT, CONTINUE, WHILE, FOR
+    и FOREACH вы можете организовать в функции повторение серии
+    команд» (41.6.5 Simple Loops
+    <a href="https://www.postgresql.org/docs/17/plpgsql-control-structures.html">/docs/17/plpgsql-control-structures.html</a>).
+    Самый частый — цикл по результату запроса: «Используя другой
+    тип цикла FOR, вы можете итерироваться по результатам запроса...
+    Цель последовательно принимает каждую строку-результат
+    запроса, и тело цикла выполняется для каждой» (41.6.6):</p>
+
+    <pre><code class="language-sql">-- вместо этого цикла — один UPDATE ниже!
+CREATE FUNCTION set_min_rating(p_book_id int, p_min int)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    FOR r IN
+        SELECT review_id FROM reviews
+        WHERE book_id = p_book_id AND rating &lt; p_min
+    LOOP
+        UPDATE reviews SET rating = p_min WHERE review_id = r.review_id;
+    END LOOP;
+END;
+$$;</code></pre>
+
+    <p>Тот же результат без цикла: <code>UPDATE reviews SET rating =
+    p_min WHERE book_id = p_book_id AND rating &lt; p_min;</code> —
+    один вызов UPDATE затрагивает все строки сразу (глава 5.2),
+    а цикл выполняет по одному оператору на строку, и каждый
+    проходит свой путь разбор→план→исполнение (глава 9.1).
+    Поэтому правило: если задачу можно выразить одним
+    множественным оператором SQL — выражайте её так; PL/pgSQL
+    добавляйте для логики, которую SQL не выражает. Это не
+    запрет, а ориентир цены решения: построчная обработка
+    имеет смысл для сложных вычислений над каждой строкой,
+    а не для замены UPDATE.</p>
+
+    <h2>Как это исполняется</h2>
+    <p>PL/pgSQL — интерпретируемый язык, и документация
+    описывает это точно (41.11.2 Plan Caching, перевод
+    дословный): «Интерпретатор PL/pgSQL разбирает исходный
+    текст функции и создаёт внутреннее бинарное дерево
+    инструкций при первом вызове функции (в каждой сессии).
+    Дерево инструкций полностью переводит структуру операторов
+    PL/pgSQL, но отдельные SQL-выражения и SQL-команды,
+    используемые в функции, не переводятся немедленно. При
+    первом выполнении каждого выражения или SQL-команды в
+    функции интерпретатор PL/pgSQL разбирает и анализирует
+    команду, создавая подготовленный оператор с помощью
+    функции SPI_prepare менеджера SPI. Последующие проходы по
+    этому выражению или команде переиспользуют подготовленный
+    оператор». Отсюда следствия: повторный вызов <code>rate_book</code>
+    в той же сессии не парсит тело заново; а «недостаток в
+    том, что ошибки в конкретном выражении или команде нельзя
+    обнаружить, пока эта часть функции не достигнута при
+    исполнении» (41.11.2).</p>
+    <p>В исходном коде за это отвечают два файла
+    <code>src/pl/plpgsql/src/</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>.
+    Компиляция: <code>plpgsql_compile</code> (pl_comp.c, строка 136;
+    «This is the slow part of plpgsql_compile()», строка 242 —
+    построение дерева инструкций из текста). Исполнение:
+    pl_exec.c — «Executor for the PL/pgSQL procedural language»
+    (шапка, строки 3–4), входная точка — <code>plpgsql_exec_function</code>
+    (строка 482): именно она получает дерево инструкций и
+    выполняет их одну за другой, подставляя значения переменных.
+    Сам вызов доходит сюда так же, как до SQL-функции из главы
+    10.1: менеджер функций определяет язык по <code>pg_proc.prolang</code>
+    и передаёт управление обработчику языка. Разовая команда
+    без создания функции — <code>DO</code>: «DO выполняет анонимный блок
+    кода, или, другими словами, временную анонимную функцию на
+    процедурном языке» (DO,
+    <a href="https://www.postgresql.org/docs/17/sql-do.html">/docs/17/sql-do.html</a>);
+    в коде её обрабатывает <code>ExecuteDoStmt</code> (functioncmds.c,
+    строка 2066) — удобно для миграций и разовых скриптов.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Хранимые процедуры и функции — предмет § 5.2 Functions
+    and Procedures учебника Silberschatz (7-е изд., гл. 5
+    Advanced SQL, с. 198): там же разобраны аргументы «за»
+    (инкапсуляция логики в БД, целостность, переиспользование)
+    и стандартный процедурный SQL/PSM. PostgreSQL выбрал
+    собственный язык PL/pgSQL (диалект; влияние Oracle PL/SQL
+    заметно в синтаксисе) — при переносе между СУБД это
+    отличие надо учитывать. Курс CMU 15-445 хранимым функциям
+    отдельной лекции не отводит; в этом модуле академический
+    фундамент — Silberschatz. Русскоязычный разбор внутренностей
+    PL/pgSQL — книга Рогова «PostgreSQL изнутри» (соответствующие
+    главы о функциях); все утверждения здесь сверены с
+    документацией 17.11 и кодом на базовом коммите.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем PL/pgSQL-функция отличается от
+      SQL-функции по выразимости и что у них общего в
+      исполнении SQL-команд внутри?</summary>
+      <p><b>Ответ.</b> SQL-функция — «список SQL-операторов,
+      разделённых точками с запятой» без ветвлений (36.5);
+      PL/pgSQL «добавляет управляющие конструкции к языку SQL»
+      (41.1) — переменные, IF/CASE, циклы. Общее: встроенные
+      SQL-команды в обоих случаях идут через общий путь
+      разбор→планирование→исполнение (глава 9.1), причём
+      PL/pgSQL кэширует подготовленные операторы: «при первом
+      выполнении... создаёт подготовленный оператор с помощью
+      SPI_prepare. Последующие проходы... переиспользуют
+      подготовленный оператор» (41.11.2).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что делает переменная FOUND после
+      SELECT INTO и после UPDATE? Как она используется в
+      rate_book?</summary>
+      <p><b>Ответ.</b> «Оператор SELECT INTO устанавливает
+      FOUND в true, если строка назначена, и в false, если
+      строка не возвращена»; «UPDATE, INSERT, DELETE и MERGE
+      устанавливают FOUND в true, если затронута хотя бы одна
+      строка» (41.5.5). В <code>rate_book</code> после SELECT INTO проверка
+      <code>IF FOUND</code> выбирает ветку: обновить существующий отзыв
+      или вставить новый — без отдельного подсчёта строк.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему цикл FOR по строкам с UPDATE
+      внутри хуже одного множественного UPDATE, и когда
+      построчная обработка всё же оправдана?</summary>
+      <p><b>Ответ.</b> Один UPDATE затрагивает все строки
+      одним оператором (глава 5.2); цикл выполняет по оператору
+      на строку, каждый со своим разбором и планированием
+      (глава 9.1) — накладные расходы растут с числом строк.
+      Оправдана построчная обработка, когда над каждой строкой
+      нужна логика, не выражаемая множественным оператором
+      (сложные ветвления, коды результата); ориентир — «данные
+      по возможности в SQL, а не в цикле».</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="10-01-sql-functions.html">← Предыдущая: 10.1. Функции на SQL</a>
+      <a class="next" href="10-03-triggers.html">Следующая: 10.3. Триггеры: реакция на изменения →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/plpgsql-overview.html">PL/pgSQL — Overview (41.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-structure.html">Structure of PL/pgSQL (41.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-declarations.html">Declarations (41.3, %TYPE — 41.3.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-statements.html">Basic Statements (41.5: SELECT INTO — 41.5.3, FOUND — 41.5.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-control-structures.html">Control Structures (41.6: IF — 41.6.4, циклы — 41.6.5–41.6.6)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-implementation.html">PL/pgSQL under the Hood (41.11.2 Plan Caching)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-do.html">DO</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/pl/plpgsql/src/pl_comp.c">src/pl/plpgsql/src/pl_comp.c</a>
+        (<code>plpgsql_compile</code> L136, «This is the slow part of plpgsql_compile()» L242),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/pl/plpgsql/src/pl_exec.c">src/pl/plpgsql/src/pl_exec.c</a>
+        (шапка «Executor for the PL/pgSQL procedural language» L3–4, <code>plpgsql_exec_function</code> L482),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/functioncmds.c">src/backend/commands/functioncmds.c</a>
+        (<code>ExecuteDoStmt</code> L2066, комментарий L2063–2064).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 5 Advanced SQL, § 5.2 Functions and Procedures (с. 198); SQL/PSM как стандартный аналог.</li>
+      <li>Рогов Е. PostgreSQL изнутри. — главы о функциях и серверном программировании (структурная основа; утверждения сверены с документацией 17.11 и кодом на базовом коммите).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

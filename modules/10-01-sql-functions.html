@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 10.1. Функции на SQL — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="10-01-sql-functions">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m10">Модуль 10. Серверное программирование</a> /
+    <span aria-current="page">Глава 10.1. Функции на SQL</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 10.1. Функции на SQL</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T46 · PostgreSQL 17.11</p>
+
+    <h2>Один запрос — в пяти местах кода</h2>
+    <p>Запрос «средний рейтинг книги» понадобился приложению
+    читательского дневника пять раз: в списке книг, в карточке,
+    в отчёте, в API и в скрипте рассылки. Копия запроса
+    засела в пяти файлах, и когда в формуле появилась поправка
+    «не считать отзывы без комментария», четыре копии обновили,
+    а пятую забыли. Знакомая история из обычного
+    программирования решается обычным способом — вынести код в
+    функцию. Только функция эта живёт не в приложении, а в
+    самой базе данных, рядом с данными. PostgreSQL даёт для
+    этого несколько языков; начнём с самого простого —
+    функций, тело которых написано на обычном SQL.</p>
+
+    <h2>Первая функция</h2>
+    <p>Сначала договоримся о терминах через документацию.
+    Раздел 36.3 User-Defined Functions
+    (<a href="https://www.postgresql.org/docs/17/xfunc.html">/docs/17/xfunc.html</a>):
+    «PostgreSQL предоставляет четыре вида функций: функции на
+    языке запросов (функции, написанные на SQL) (раздел 36.5),
+    функции на процедурных языках (функции, написанные, например,
+    на PL/pgSQL или PL/Tcl) (раздел 36.8), внутренние функции
+    (раздел 36.9) и функции на языке C (раздел 36.10)». Эта глава —
+    про первый вид, следующая — про второй. Раздел 36.5 Query
+    Language (SQL) Functions
+    (<a href="https://www.postgresql.org/docs/17/xfunc-sql.html">/docs/17/xfunc-sql.html</a>,
+    далее цитаты дословные) объясняет главное свойство таких
+    функций: «SQL-функции выполняют произвольный список SQL-
+    операторов, возвращая результат последнего запроса в списке.
+    В простом (не множественном) случае возвращается первая
+    строка результата последнего запроса». И про тело:
+    «тело SQL-функции должно быть списком SQL-операторов,
+    разделённых точками с запятой... Если функция не объявлена
+    возвращающей void, последним оператором должен быть SELECT
+    или INSERT, UPDATE, DELETE или MERGE с предложением
+    RETURNING».</p>
+    <p>Функция «средний рейтинг книги» на наших таблицах из
+    главы 2.3:</p>
+
+    <pre><code class="language-sql">CREATE FUNCTION avg_book_rating(p_book_id int)
+RETURNS numeric
+LANGUAGE sql
+AS $$
+    SELECT round(avg(rating), 2)
+    FROM reviews
+    WHERE book_id = p_book_id;
+$$;</code></pre>
+
+    <p>Разбор: <code>LANGUAGE sql</code> называет язык, на котором
+    написано тело функции (полный синтаксис CREATE FUNCTION —
+    в <a href="https://www.postgresql.org/docs/17/sql-createfunction.html">/docs/17/sql-createfunction.html</a>);
+    тело обёрнуто в долларовые кавычки <code>$$...$$</code> из главы 2.6 —
+    обычный строковый литерал. Параметры можно адресовать по
+    имени (<code>p_book_id</code>), как здесь, или позиционно: «в старом
+    числовом подходе аргументы адресуются с помощью синтаксиса
+    $n: $1 ссылается на первый входной аргумент, $2 — на второй,
+    и так далее» (36.5.1). Вызов функции ничем не отличается от
+    вызова встроенной:</p>
+
+    <pre><code class="language-sql">SELECT title, avg_book_rating(book_id)
+FROM books
+WHERE book_id IN (13, 14);</code></pre>
+
+    <pre class="sample-output">      title       | avg_book_rating
+-------------------+-----------------
+ Пиковая дама      |
+ Полтава           |
+(2 rows)</pre>
+
+    <p>Что выведено и почему: для каждой строки <code>books</code> сервер
+    выполнил тело функции — агрегат <code>avg</code> по отзывам этой
+    книги (глава 2.4). «Пиковая дама» и «Полтава» появились в
+    главе 6.2 и отзывов не получили, поэтому оба вызова вернули
+    NULL — «все агрегатные функции, кроме count, возвращают
+    null, когда не выбрано ни одной строки» (9.21
+    <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">/docs/17/functions-aggregate.html</a>):
+    пустые ячейки в выводе — это он, NULL, psql рисует его
+    пустым местом (глава 2.1).</p>
+
+    <h2>Функция, возвращающая таблицу</h2>
+    <p>Скалярной функции мало, когда нужен список. Раздел 36.5.10
+    SQL Functions Returning TABLE: «другой вариант — RETURNS
+    TABLE(столбцы). В этом случае возвращаются все строки
+    результата последнего запроса». Топ-3 книги по рейтингу:</p>
+
+    <pre><code class="language-sql">CREATE FUNCTION top_books(p_n int)
+RETURNS TABLE (book_id_out int, title_out text, avg_rating numeric)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT b.book_id, b.title, round(avg(r.rating), 2)
+    FROM books b
+    JOIN reviews r USING (book_id)
+    GROUP BY b.book_id, b.title
+    ORDER BY avg(r.rating) DESC, b.book_id
+    LIMIT p_n;
+$$;
+
+SELECT * FROM top_books(3);</code></pre>
+
+    <pre class="sample-output"> book_id_out |       title_out        | avg_rating
+-------------+------------------------+------------
+           3 | Мёртвые души           |       5.00
+           4 | Война и мир            |       5.00
+           1 | Евгений Онегин         |       4.67
+(3 rows)</pre>
+
+    <p>Что выведено и почему: функция вернула множество строк,
+    и <code>FROM top_books(3)</code> сработала как источник таблицы —
+    «все SQL-функции можно использовать в предложении FROM
+    запроса» (36.5.8 SQL Functions as Table Sources).
+    Выводные столбцы названы <code>book_id_out</code>/<code>title_out</code>
+    специально: «имена столбцов RETURNS TABLE — это по сути
+    выходные параметры», и их имена конфликтуют с именами
+    колонок таблиц в запросе; «вы можете избежать двусмысленности,
+    выбрав другой алиас для таблицы внутри команды SQL» (36.5.1).
+    В <code>ORDER BY</code> стоит вторичный ключ <code>b.book_id</code>, чтобы порядок
+    при равных рейтингах был предсказуем — правило из главы
+    2.2 (ORDER BY без уникального ключа не даёт гарантий
+    порядка): «Мёртвые души» (одна пятёрка — отзыв 17 из
+    главы 8.1) и «Война и мир» (две пятёрки — отзывы 5 и 15)
+    набрали по 5.00, и младший <code>book_id</code> встал первым. А вот
+    «Пиковая дама» и «Полтава» в топ не попали вовсе:
+    <code>JOIN reviews</code> отбрасывает книги без отзывов — внутреннее
+    соединение из главы 2.3.</p>
+
+    <h2>Метки изменчивости: обещание оптимизатору</h2>
+    <p>В <code>top_books</code> появилось слово STABLE. Это метка
+    изменчивости — «категория изменчивости — это обещание
+    оптимизатору о поведении функции» (36.7 Function Volatility
+    Categories
+    <a href="https://www.postgresql.org/docs/17/xfunc-volatility.html">/docs/17/xfunc-volatility.html</a>,
+    далее дословно):</p>
+    <ul>
+      <li>«Функция VOLATILE может делать что угодно, включая
+      изменение базы данных. Она может возвращать разные
+      результаты при последовательных вызовах с одинаковыми
+      аргументами. Оптимизатор не делает никаких предположений
+      о поведении таких функций. Запрос с изменчивой функцией
+      будет перевычислять её в каждой строке, где нужно её
+      значение»;</li>
+      <li>«Функция STABLE не может изменять базу данных и
+      гарантированно возвращает одинаковые результаты для
+      одинаковых аргументов для всех строк в пределах одного
+      оператора. Эта категория позволяет оптимизатору
+      оптимизировать несколько вызовов функции в один вызов...
+      безопасно использовать выражение с такой функцией в
+      условии индексного сканирования»;</li>
+      <li>«Функция IMMUTABLE не может изменять базу данных и
+      гарантированно возвращает одинаковые результаты для
+      одинаковых аргументов всегда. Эта категория позволяет
+      оптимизатору вычислить функцию заранее, когда запрос
+      вызывает её с константными аргументами».</li>
+    </ul>
+    <p>«VOLATILE — значение по умолчанию, если команда CREATE
+    FUNCTION не указывает категорию» (36.7). Какую метку выбрать
+    для <code>avg_book_rating</code>? Функция читает таблицу <code>reviews</code> —
+    её результат зависит от содержимого таблицы, которое
+    меняется между операторами, поэтому IMMUTABLE (обещание
+    «одинаковый результат навсегда») — ложь и опасна. Но в
+    пределах одного оператора действует один снимок данных
+    (глава 6.3), поэтому честная метка — STABLE, как и
+    у <code>top_books</code>. Совет документации: «для лучших результатов
+    оптимизации помечайте функции самой строгой категорией
+    изменчивости, которая для них допустима. Любая функция
+    с побочными эффектами должна быть помечена VOLATILE, чтобы
+    её вызовы не могли быть оптимизированы» (36.7). Комментарий
+    в коде каталога повторяет то же: <code>PROVOLATILE_IMMUTABLE &#x27;i&#x27;
+    /* never changes for given input */</code>, <code>PROVOLATILE_STABLE
+    &#x27;s&#x27; /* does not change within a scan */</code> (pg_proc.h, строки
+    164–165). Проверим, что метка реально хранится:</p>
+
+    <pre><code class="language-sql">SELECT proname, provolatile, prokind
+FROM pg_proc
+WHERE proname IN ('avg_book_rating', 'top_books');
+
+ALTER FUNCTION avg_book_rating(int) STABLE;</code></pre>
+
+    <pre class="sample-output">    proname     | provolatile | prokind
+----------------+-------------+---------
+ avg_book_rating | v           | f
+ top_books       | s           | f
+(2 rows)
+
+ALTER FUNCTION</pre>
+
+    <p>Что выведено и почему: обе функции попали в системный
+    каталог <code>pg_proc</code> — схему <code>pg_catalog</code> вы видели в главе
+    4.5. Колонка <code>provolatile</code> хранит метку одной буквой, и
+    до <code>ALTER FUNCTION</code> у <code>avg_book_rating</code> виден <code>&quot;v&quot;</code> —
+    значение по умолчанию (36.7); после ALTER станет <code>&quot;s&quot;</code>.
+    <code>prokind</code> равен <code>&quot;f&quot;</code> — «function» (значения <code>prokind</code>
+    определены в pg_proc.h, строки 149–154). Поля каталога —
+    <code>prolang</code> («OID языка», строка 44), <code>prosrc</code> («исходный
+    текст», строка 115) — определены в
+    <code>src/include/catalog/pg_proc.h</code>: каталог
+    <code>CATALOG(pg_proc, 1255, ...)</code> объявлен в строке 30 на
+    коммите <code>083ac033419f690758508e08c1736089384bbee8</code>.</p>
+
+    <h2>Как это исполняется</h2>
+    <p>Механизм создания: команда CREATE FUNCTION обрабатывается
+    функцией <code>CreateFunction</code> в <code>src/backend/commands/functioncmds.c</code>
+    (строка 1011), которая через <code>ProcedureCreate</code> из
+    <code>src/backend/catalog/pg_proc.c</code> (строка 70) пишет
+    строку в каталог <code>pg_proc</code> — тело функции хранится как
+    текст, язык — как OID на <code>pg_language</code>. Исполнение
+    SQL-функции — работа файла <code>src/backend/executor/functions.c</code>
+    («Execution of SQL-language functions», строка 3). При
+    первом вызове <code>init_sql_fcache</code> (строка 583) разбирает
+    тело на операторы и строит записи исполнения: «у нас есть
+    запись execution_state для каждого запроса в функции.
+    Каждая запись содержит дерево плана для своего запроса»
+    (комментарий, строки 51–58). Дальше вы уже знаете путь из
+    главы 9.1: каждый оператор тела проходит разбор, планирование
+    и исполнение, а результат последнего оператора возвращается
+    как результат функции. Вызов диспетчеризует <code>fmgr_sql</code>
+    (строка 1029) — «менеджер функций» PostgreSQL находит
+    обработчик нужного языка. Для SQL-функции это означает:
+    без накладных расходов на новый язык, но и без вычислений,
+    которые нельзя выразить запросом, — для этого есть
+    PL/pgSQL, следующая глава.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Функции и процедуры, хранящиеся в самой базе данных, —
+    часть стандарта SQL и учебников: Silberschatz (7-е изд.,
+    гл. 5 Advanced SQL, § 5.2 Functions and Procedures, с. 198) —
+    там же объяснено, зачем выносить логику на сервер:
+    целостность и переиспользование. Метки изменчивости —
+    расширение PostgreSQL этой идеи: формализация понятия
+    «чистая функция» для оптимизатора запросов (в терминах
+    языков программирования — отсутствие побочных эффектов);
+    именно поэтому IMMUTABLE-функции разрешены в индексных
+    выражениях — требование из главы 8.2. Книга Моргунова
+    «Основы языка SQL» использует в примерах стандартные
+    процедурные расширения SQL/PSM; пометка: язык SQL-функций
+    в PostgreSQL соответствует стандарту, а PL/pgSQL —
+    диалект PostgreSQL (сравнение — в главе 10.2).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем тело SQL-функции отличается от
+      PL/pgSQL-функции с точки зрения того, что можно
+      написать? Что функция возвращает, если операторов
+      несколько?</summary>
+      <p><b>Ответ.</b> Тело SQL-функции — «список SQL-операторов,
+      разделённых точками с запятой», а «SQL-функции выполняют
+      произвольный список SQL-операторов, возвращая результат
+      последнего запроса в списке» (36.5). Ветвлений и циклов
+      в чистом SQL-теле нет; если функция не void, «последним
+      оператором должен быть SELECT или INSERT, UPDATE, DELETE
+      или MERGE с предложением RETURNING» (36.5). Управляющие
+      конструкции дают процедурные языки — PL/pgSQL (глава
+      10.2).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему функцию <code>avg_book_rating</code>,
+      читающую таблицу reviews, нельзя пометить IMMUTABLE, но
+      можно STABLE?</summary>
+      <p><b>Ответ.</b> IMMUTABLE — обещание «возвращать
+      одинаковые результаты для одинаковых аргументов всегда»
+      (36.7). Результат функции зависит от содержимого
+      <code>reviews</code>, которое меняется (новые отзывы), — обещание
+      ложно, и оптимизатор, доверившись, может «вычислить функцию
+      заранее» и отдать устаревшее значение. STABLE — обещание
+      «одинаковых результатов... для всех строк в пределах
+      одного оператора» (36.7): в рамках одного оператора
+      действует один снимок данных (глава 6.3), так что метка
+      честна. Общее правило: «помечайте функции самой строгой
+      категорией, которая для них допустима» (36.7).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Что хранит сервер после CREATE
+      FUNCTION и где? Какая колонка каталога отвечает за метку
+      изменчивости?</summary>
+      <p><b>Ответ.</b> Функция — строка системного каталога
+      <code>pg_proc</code>: тело как текст в <code>prosrc</code>, язык как OID в
+      <code>prolang</code>, метка изменчивости — <code>provolatile</code> ('i'/'s'/'v'),
+      вид — <code>prokind</code> ('f' для функции) — поля определены в
+      <code>src/include/catalog/pg_proc.h</code> (CATALOG
+      pg_proc — строка 30, provolatile — строка 74, prosrc —
+      строка 115). CREATE FUNCTION обрабатывает <code>CreateFunction</code>
+      (functioncmds.c, L1011), запись каталога создаёт
+      <code>ProcedureCreate</code> (pg_proc.c, L70). Исполняет SQL-функцию
+      <code>src/backend/executor/functions.c</code>: при первом
+      вызове <code>init_sql_fcache</code> строит «запись execution_state
+      для каждого запроса в функции... содержащую дерево плана»
+      (строки 51–58).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="09-05-sort-aggregation-cost.html">← Предыдущая: 9.5. Сортировка, агрегация и стоимость</a>
+      <a class="next" href="10-02-plpgsql.html">Следующая: 10.2. PL/pgSQL: логика на сервере →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-createfunction.html">CREATE FUNCTION</a>,
+        <a href="https://www.postgresql.org/docs/17/xfunc.html">User-Defined Functions (36.3 — четыре вида функций)</a>,
+        <a href="https://www.postgresql.org/docs/17/xfunc-sql.html">Query Language (SQL) Functions (36.5 — тело, $n-аргументы, RETURNS TABLE, конфликт имён)</a>,
+        <a href="https://www.postgresql.org/docs/17/xfunc-volatility.html">Function Volatility Categories (36.7)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">Aggregate Functions (9.21 — avg при пустом наборе)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/functioncmds.c">src/backend/commands/functioncmds.c</a>
+        (<code>CreateFunction</code> L1011),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/pg_proc.c">src/backend/catalog/pg_proc.c</a>
+        (<code>ProcedureCreate</code> L70),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_proc.h">src/include/catalog/pg_proc.h</a>
+        (CATALOG(pg_proc) L30, prolang L44, prokind L59 и PROKIND_* L149–154, provolatile L74 и PROVOLATILE_* L164–166, prosrc L115),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/functions.c">src/backend/executor/functions.c</a>
+        («Execution of SQL-language functions» L3, execution_state L51–58, <code>init_sql_fcache</code> L583, <code>fmgr_sql</code> L1029).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 5 Advanced SQL, § 5.2 Functions and Procedures (с. 198).</li>
+      <li>Моргунов Е. П. Основы языка SQL. — соответствующие главы о функциях; примеры стандартизированы по SQL/PSM (пометка: SQL-функции PostgreSQL соответствуют стандарту, PL/pgSQL — расширение PostgreSQL).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

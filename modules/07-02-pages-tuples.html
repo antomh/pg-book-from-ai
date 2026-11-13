@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 7.2. Страницы данных и кортежи — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="07-02-pages-tuples">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m07">Модуль 7. Хранение внутри</a> /
+    <span aria-current="page">Глава 7.2. Страницы данных и кортежи</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 7.2. Страницы данных и кортежи</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T35 · PostgreSQL 17.11</p>
+
+    <h2>Что физически лежит в файле таблицы</h2>
+    <p>Коллега посмотрел на вашу таблицу <code>reviews</code> и сказал: «11
+    строк — и целый файл в 8 килобайт? Почти килобайт на каждую!»
+    Ошибка не в данных, а в модели: таблица — не
+    «поток строк», а <b>массив страниц фиксированного
+    размера</b>. Документация: «каждая таблица и индекс хранится
+    как массив страниц фиксированного размера (обычно 8 КБ,
+    хотя другой размер страницы может быть выбран при компиляции
+    сервера). В таблице все страницы логически эквивалентны,
+    поэтому конкретный элемент (строка) может храниться в любой
+    странице»
+    (<a href="https://www.postgresql.org/docs/17/storage-page-layout.html">/docs/17/storage-page-layout.html</a>,
+    65.6, перевод дословный). Из этого одного факта следуют и
+    «ступеньки» роста файлов из главы 6.7, и почему нельзя
+    хранить строку длиннее страницы (глава 7.3), и что именно
+    кеширует сервер между диском и исполнителем. Проверим
+    размер страницы запросом:</p>
+
+    <pre><code class="language-sql">SHOW block_size;
+
+SELECT relpages, pg_relation_size('reviews') AS bytes
+FROM pg_class
+WHERE relname = 'reviews';</code></pre>
+
+    <pre class="sample-output"> block_size
+------------
+ 8192
+(1 row)
+
+ relpages | bytes
+----------+-------
+        1 |  8192
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>block_size</code> — «сообщает размер
+    дискового блока. Он определяется значением BLCKSZ при сборке
+    сервера. Значение по умолчанию — 8192 байт»
+    (<a href="https://www.postgresql.org/docs/17/runtime-config-preset.html">/docs/17/runtime-config-preset.html</a>,
+    19.15; это предустановленный параметр, изменить его на
+    работающем сервере нельзя — только пересборкой). <code>pg_class</code>
+    (51.11) хранит <code>relpages</code> — «размер представления таблицы
+    на диске в страницах (размером BLCKSZ). Это только оценка,
+    используемая планировщиком. Она обновляется командами VACUUM,
+    ANALYZE и некоторыми командами DDL, такими как CREATE
+    INDEX» — и <code>reltuples</code> рядом. <code>pg_relation_size</code> — «вычисляет
+    дисковое пространство, используемое одним "форком" указанного
+    отношения... С одним аргументом возвращает размер основного
+    форка данных отношения»
+    (<a href="https://www.postgresql.org/docs/17/functions-admin.html">/docs/17/functions-admin.html</a>,
+    9.26). Таблица с нашими одиннадцатью короткими отзывами уместилась на
+    одной странице: 8192 байта. Одиннадцать — это число видимых
+    логических строк; физических версий в файле больше —
+    счёт покажет демонстрация ctid ниже. Заметьте:
+    не «11 × 80 байт», а ровно
+    одна страница — меньше страницы PostgreSQL не выделяет. Если
+    таблицу только что создали и заполнили, <code>relpages</code> может ещё
+    показывать 0 или устаревшее число: оценка обновляется
+    VACUUM, ANALYZE и autovacuum (глава 6.7), а
+    <code>pg_relation_size</code> читает размер с диска всегда точно.</p>
+
+    <h2>Устройство страницы: пять частей</h2>
+    <p>Терминологию страницы задаёт 65.6: «термин item относится
+    к отдельному значению данных, хранящемуся на странице. В
+    таблице item — это строка; в индексе item — это индексная
+    запись». Страница состоит из пяти частей (таблица 65.2,
+    дословно):</p>
+    <table class="data-table">
+      <thead>
+        <tr><th>Часть</th><th>Описание</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PageHeaderData</td><td>«Длина 24 байта. Содержит общую информацию о странице, включая указатели на свободное пространство»</td></tr>
+        <tr><td>ItemIdData</td><td>«Массив идентификаторов элементов, указывающих на фактические элементы. Каждая запись — пара (смещение, длина). 4 байта на элемент»</td></tr>
+        <tr><td>Свободное пространство</td><td>«Нераспределённое пространство. Новые идентификаторы элементов выделяются из начала этой области, новые элементы — с конца»</td></tr>
+        <tr><td>Items</td><td>«Сами фактические элементы» — версии строк</td></tr>
+        <tr><td>Special space</td><td>«Данные, специфичные для метода доступа индекса. Разные методы хранят разные данные. Пусто в обычных таблицах»</td></tr>
+      </tbody>
+    </table>
+    <p>Первые 24 байта занимает заголовок: «первое поле
+    отслеживает самую последнюю запись WAL, связанную с этой
+    страницей» (связь с журналом из главы 6.1), «за ним следуют
+    три 2-байтных целочисленных поля (pd_lower, pd_upper и
+    pd_special). Они содержат байтовые смещения от начала
+    страницы до начала нераспределённого пространства, до конца
+    нераспределённого пространства и до начала специального
+    пространства» (65.6). В коде это структура <code>PageHeaderData</code>
+    в <code>src/include/storage/bufpage.h</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>
+    (строка 155): поля <code>pd_lower</code> (строка 162, комментарий
+    «offset to start of free space»), <code>pd_upper</code> (строка 163),
+    <code>pd_special</code> (строка 164), а <code>pd_linp</code> (строка 167) — тот
+    самый массив указателей на элементы. Идентификатор элемента
+    <code>ItemIdData</code> объявлен в
+    <code>src/include/storage/itemid.h</code> (строка 25): два
+    15-битных поля <code>lp_off</code> — «смещение до кортежа (от начала
+    страницы)» и <code>lp_len</code> — «байтовая длина кортежа» (строки
+    27–29). Отсюда важное свойство: «идентификатор элемента
+    никогда не перемещается, пока не освобождён, поэтому его
+    индекс можно использовать на долгосрочной основе для ссылки
+    на элемент» (65.6).</p>
+
+    <h2>ctid: адрес версии строки</h2>
+    <p>Пара «номер страницы + номер идентификатора элемента» —
+    это и есть системный столбец <code>ctid</code> из главы 5.4:
+    «физическое расположение версии строки в её таблице...
+    ctid можно использовать для очень быстрого нахождения версии
+    строки, однако ctid строки изменится, если она обновляется
+    или перемещается командой VACUUM FULL. Поэтому ctid не
+    следует использовать как идентификатор строки. Для
+    идентификации логических строк следует использовать первичный
+    ключ»
+    (<a href="https://www.postgresql.org/docs/17/ddl-system-columns.html">/docs/17/ddl-system-columns.html</a>,
+    дословно):</p>
+
+    <pre><code class="language-sql">SELECT ctid, review_id, rating
+FROM reviews
+ORDER BY ctid
+LIMIT 3;</code></pre>
+
+    <pre class="sample-output"> ctid  | review_id | rating
+-------+-----------+--------
+ (0,3) |         3 |      4
+ (0,4) |         4 |      5
+ (0,5) |         5 |      5
+(3 rows)</pre>
+
+    <p>Что выведено и почему: <code>(0,3)</code> читается как «страница 0,
+    идентификатор элемента 3». Первые три <i>живые</i> версии — но не
+    первые три слота страницы: позиции <code>(0,1)</code> и <code>(0,2)</code> заняты
+    мёртвыми версиями отзывов 1–2 — их обновил и зафиксировал
+    победитель тупика из главы 6.6, а новые версии этих же строк
+    легли в конец страницы; слоты <code>(0,10)</code>–<code>(0,14)</code> хранят
+    мёртвые версии: удалённые строки (архив из 6.1, спам из 5.2) и
+    старые версии обновлённых отзывов (демо из глав 6.3 и 6.4). SELECT такие версии не видит и в вывод не
+    включает — их физически убирает VACUUM (глава 6.7).
+    Напомним связь с MVCC (глава 6.4):
+    после <code>UPDATE</code> той же строки появится новая версия — с новым
+    <code>ctid</code>, потому что «каждое обновление строки создаёт новую
+    версию строки для того же логического ряда» (5.4); старая
+    версия остаётся на старом месте до уборки (глава 6.7).
+    Поэтому <code>ctid</code> и нельзя делать первичным ключом. Внутри
+    версии строки лежит знакомый по 6.4 заголовок
+    <code>HeapTupleHeaderData</code> с <code>xmin</code>/<code>xmax</code>
+    (src/include/access/htup_details.h, строка 153) — страница
+    хранит именно версии, а не логические строки.</p>
+
+    <h2>Буферный кеш: страницы между диском и исполнителем</h2>
+    <p>Исполнителю запроса (глава 7.1) нужны страницы, а страницы
+    лежат в файлах на диске. Между ними — буферный кеш в
+    разделяемой памяти сервера: «устанавливает объём памяти,
+    который сервер базы данных использует для разделяемых
+    буферов памяти. Значение по умолчанию обычно 128 мегабайт
+    (128MB)... этот параметр может быть установлен только при
+    старте сервера» (<code>shared_buffers</code>,
+    <a href="https://www.postgresql.org/docs/17/runtime-config-resource.html">/docs/17/runtime-config-resource.html</a>,
+    19.4.1). Тонкая настройка — эксплуатационная тема (middle+),
+    но принципиальная схема видна и так: страница читается с
+    диска один раз, дальше все процессы сервера работают с её
+    копией в кеше. Механизм доступа к буферам описан в README
+    буферного менеджера (<code>src/backend/storage/buffer/README</code>
+    на базовом коммите): «нужно "держать пин на" буфере
+    (увеличить его счётчик ссылок), прежде чем будет позволено
+    делать с ним что-либо вообще... Обычно пин приобретается
+    через ReadBuffer и освобождается через ReleaseBuffer».
+    Функция чтения — <code>ReadBufferExtended</code> в
+    <code>src/backend/storage/buffer/bufmgr.c</code> (строка
+    799): если страница уже в кеше, возвращает её буфер; если
+    нет — читает с диска. Единицей обмена всегда остаётся
+    страница: «каждая таблица и индекс хранится как массив
+    страниц» (65.6). Именно поэтому «горячие» страницы таблицы
+    отдаются из памяти, а размеры <code>relpages</code>/<code>reltuples</code> из
+    <code>pg_class</code> нужны планировщику как оценка объёма чтения —
+    но это уже тема модуля 9.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Страница — это блочное хранение из учебников: Silberschatz
+    (7-е изд., гл. 13 Data Storage Structures, § 13.1) описывает
+    разбивку хранилища на блоки фиксированного размера и хранение
+    записей внутри блока (со слотами-указателями — то, что в
+    PostgreSQL называется ItemIdData); курс CMU 15-445 разбирает
+    слотовые страницы в лекции #05 Database Storage II. Отличие
+    от «учебникового» варианта: PostgreSQL вплетает в ту же
+    страницу многоверсионность — каждая ячейка слота адресует
+    не логическую строку, а версию строки (глава 6.4). Книга
+    «PostgreSQL изнутри» (Ч. I «Страницы и версии строк»)
+    описывает эту же конструкцию; все утверждения главы сверены
+    с документацией 65.6 и кодом на базовом коммите.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>SHOW block_size</code> возвращает
+      8192 на любом стандартном сервере, и можно ли получить
+      страницу в 16 КБ на уже установленном кластере?</summary>
+      <p><b>Ответ.</b> «block_size... определяется значением
+      BLCKSZ при сборке сервера. Значение по умолчанию — 8192
+      байт» (19.15); «другой размер страницы может быть выбран
+      при компиляции сервера» (65.6). Нет: для установленного
+      кластера размер фиксирован сборкой, параметр —
+      предустановленный и только для чтения.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что означает ctid = (3, 12) и почему
+      после UPDATE строки этот адрес перестаёт быть
+      постоянным?</summary>
+      <p><b>Ответ.</b> Страница 3, идентификатор элемента 12:
+      каждая запись ItemIdData — «пара (смещение, длина)»
+      (таблица 65.2), указывающая на версию строки. UPDATE
+      «создаёт новую версию строки для того же логического ряда»
+      (5.4), а «ctid строки изменится, если она обновляется или
+      перемещается VACUUM FULL» (5.4) — новая версия получает
+      другое место (возможно, другую страницу), старое занимает
+      мёртвая версия до уборки (глава 6.7).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Зачем между исполнителем запроса и
+      файлами таблицы стоит буферный кеш, и что общего у кеша
+      со страницами?</summary>
+      <p><b>Ответ.</b> Кеш — разделяемая память (глава 7.1),
+      размером <code>shared_buffers</code> («...может быть установлен только
+      при старте сервера», 19.4.1), в которой живут прочитанные
+      страницы. Доступ регулируется пинами: «нужно держать пин
+      на буфере... прежде чем будет позволено делать с ним
+      что-либо вообще» (src/backend/storage/buffer/README);
+      чтение — <code>ReadBufferExtended</code> (bufmgr.c, строка 799).
+      Общее — единица: и на диске, и в кеше данные живут
+      страницами по <code>block_size</code>, «каждая таблица и индекс
+      хранится как массив страниц» (65.6).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="07-01-process-architecture.html">← Предыдущая: 7.1. Архитектура процессов и памяти</a>
+      <a class="next" href="07-03-toast.html">Следующая: 7.3. TOAST: хранение больших значений →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/storage-page-layout.html">Database Page Layout (65.6, таблицы 65.2–65.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/storage-toast.html">TOAST (65.2: «PostgreSQL uses a fixed page size...»)</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-system-columns.html">System Columns (5.4: ctid)</a>,
+        <a href="https://www.postgresql.org/docs/17/runtime-config-preset.html">Preset Options (19.15: block_size)</a>,
+        <a href="https://www.postgresql.org/docs/17/runtime-config-resource.html">Resource Consumption (19.4.1: shared_buffers)</a>,
+        <a href="https://www.postgresql.org/docs/17/catalog-pg-class.html">pg_class (51.11: relpages, reltuples)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-admin.html">Database Object Management Functions (9.26: pg_relation_size)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/storage/bufpage.h">src/include/storage/bufpage.h</a>
+        (<code>PageHeaderData</code> L155; <code>pd_lower</code> L162, <code>pd_upper</code> L163, <code>pd_special</code> L164, <code>pd_linp</code> L167),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/storage/itemid.h">src/include/storage/itemid.h</a>
+        (<code>ItemIdData</code> L25, <code>lp_off</code>/<code>lp_len</code> L27–29),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/storage/buffer/bufmgr.c">src/backend/storage/buffer/bufmgr.c</a>
+        (<code>ReadBufferExtended</code> L799),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/storage/buffer/README">src/backend/storage/buffer/README</a>
+        (правила пинов),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/access/htup_details.h">src/include/access/htup_details.h</a>
+        (<code>HeapTupleHeaderData</code> L153).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 13 Data Storage Structures, § 13.1.</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекция #05 Database Storage II (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+      <li>Рогов Е. В. и др. «PostgreSQL изнутри» — Ч. I «Страницы и версии строк». Структурная основа; утверждения сверены с документацией 17.11.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

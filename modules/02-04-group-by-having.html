@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.4. Агрегация: GROUP BY и HAVING — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-04-group-by-having">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.4. Агрегация: GROUP BY и HAVING</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.4. Агрегация: GROUP BY и HAVING</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T07 · PostgreSQL 17.11</p>
+
+    <h2>«Сколько книг у каждого автора» ломает SELECT</h2>
+    <p>Отчёт требует числа: книг по каждому автору, средний рейтинг по
+    автору. Разработчик пишет:</p>
+
+    <pre><code class="language-sql">SELECT title, count(*) FROM books;</code></pre>
+
+    <pre class="sample-output">ERROR:  column "books.title" must appear in the GROUP BY clause or be used in an aggregate function
+LINE 1: SELECT title, count(*) FROM books;
+       ^
+</pre>
+
+    <p>Ошибка пугает, но она точна: запрос одновременно просит
+    <i>построчные</i> данные (<code>title</code>) и <i>сводные</i> (<code>count(*)</code>), а
+    серверу нужно понять, какое именно <code>title</code> показать рядом с
+    единственным числом. Текст сообщения берётся прямо из исходного кода
+    сервера — функция анализа группировки в файле
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_agg.c#L1494">src/backend/parser/parse_agg.c,
+    строка 1494</a> на базовом коммите (вызов <code>errmsg(&quot;column \&quot;%s.%s\&quot;
+    must appear in the GROUP BY clause or be used in an aggregate
+    function&quot;, ...)</code>). Эта глава — о том, как такие запросы писать
+    правильно: агрегатные функции, GROUP BY, HAVING и FILTER.</p>
+
+    <h2>Агрегатные функции: свёртка множества строк в одно значение</h2>
+    <p>«Агрегатные функции вычисляют единый результат из набора входных
+    значений» — раздел 9.21 Aggregate Functions,
+    <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">/docs/17/functions-aggregate.html</a>.
+    Базовый набор и их точная семантика по NULL:</p>
+    <ul>
+      <li><code>count(*)</code> — «вычисляет число входных строк» (NULL
+        не различает — считаются все строки);</li>
+      <li><code>count(expr)</code> — «вычисляет число входных строк, в
+        которых входное значение не NULL»;</li>
+      <li><code>sum(expr)</code> — «вычисляет сумму не-NULL входных
+        значений» (для integer результат — bigint);</li>
+      <li><code>avg(expr)</code> — «вычисляет среднее арифметическое всех
+        не-NULL входных значений» (для integer результат — numeric).</li>
+    </ul>
+    <p>В теории это операция агрегирования реляционной алгебры — свёртка
+    множества в скаляр (Silberschatz, <i>Database System Concepts</i>,
+    7-е изд., глава 2, раздел 2.6 «The Relational Algebra», агрегатные
+    операции; по-русски — Моргунов,
+    <i>PostgreSQL. Основы языка SQL</i>, глава 6.3). Простейший запрос
+    без всякой группировки:</p>
+
+    <pre><code class="language-sql">SELECT count(*) AS books_total,
+       count(rating) AS rated,
+       sum(rating) AS rating_sum
+FROM books;</code></pre>
+
+    <pre class="sample-output"> books_total | rated | rating_sum
+-------------+-------+------------
+           6 |     5 |         21
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>count(*)</code> — все 6 строк; <code>count(rating)</code> —
+    только строки с не-NULL рейтингом (у «Анны Карениной» NULL);
+    <code>sum(rating)</code> сложил только не-NULL значения: 5+4+4+5+3 = 21.
+    Документация фиксирует и такой случай: «если запрос содержит вызовы
+    агрегатных функций, но не содержит GROUP BY, группировка всё равно
+    происходит: результат — одна строка группы (или ни одной, если она
+    затем устранена HAVING)» (раздел 7.2.3,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).</p>
+
+    <h2>GROUP BY: свёртка по группам</h2>
+    <p>Механика по документации (раздел 7.2.3): «GROUP BY используется,
+    чтобы сгруппировать строки таблицы с одинаковыми значениями во всех
+    перечисленных столбцах... эффект — объединить каждое множество строк
+    с общими значениями в одну строку группы, представляющую все строки
+    группы. Это делается, чтобы устранить избыточность вывода и/или
+    вычислить агрегаты по этим группам». Ключевое правило из того же
+    раздела: «в общем случае, если таблица сгруппирована, столбцы, не
+    перечисленные в GROUP BY, не могут использоваться, кроме как внутри
+    агрегатных выражений». Справочник SELECT формулирует причину: при
+    наличии GROUP BY «выражениям списка SELECT нельзя ссылаться на
+    несгруппированные столбцы вне агрегатных функций» — иначе для такого
+    столбца было бы «больше одного возможного значения»
+    (<a href="https://www.postgresql.org/docs/17/sql-select.html">/docs/17/sql-select.html</a>,
+    раздел GROUP BY Clause).</p>
+
+    <pre><code class="language-sql">SELECT author_id, count(*) AS books_cnt
+FROM books
+GROUP BY author_id
+ORDER BY author_id;</code></pre>
+
+    <pre class="sample-output"> author_id | books_cnt
+-----------+-----------
+         1 |         2
+         2 |         1
+         3 |         2
+           |         1
+(4 rows)</pre>
+
+    <p>Что выведено и почему: шесть строк книг свёрнуты в четыре
+    строки-группы по значениям <code>author_id</code> (Пушкин — 2 книги, Гоголь —
+    1, Толстой — 2) плюс отдельная группа строк без автора. Правильный
+    ответ на запрос из начала главы:</p>
+
+    <pre><code class="language-sql">SELECT a.name, count(*) AS books_cnt
+FROM books b JOIN authors a ON a.author_id = b.author_id
+GROUP BY a.author_id, a.name
+ORDER BY books_cnt DESC;</code></pre>
+
+    <pre class="sample-output">      name       | books_cnt
+-----------------+-----------
+ Александр Пушкин |         2
+ Лев Толстой     |         2
+ Николай Гоголь  |         1
+(3 rows)</pre>
+
+    <p>Что выведено и почему: сначала JOIN попарно соединил книги с
+    авторами (5 строк, INNER JOIN из главы 2.3), затем строки сгруппированы
+    по автору, и в каждой группе посчитан <code>count(*)</code>. Порядок
+    действий конвейера: FROM → WHERE → GROUP BY → HAVING → список
+    выборки (глава 2.1). В GROUP BY указан и <code>author_id</code>: группировать
+    только по имени рискованно — два разных автора-однофамильца молча
+    склеятся в одну группу; уникальный ключ (суррогат из главы 1.1)
+    в GROUP BY избавляет от этого, а <code>name</code> добирается следом,
+    потому что функционально зависит от ключа.</p>
+
+    <h2>HAVING: фильтр групп</h2>
+    <p>«Если таблица сгруппирована с помощью GROUP BY, но интересны
+    только определённые группы, можно использовать HAVING — подобно
+    WHERE — для устранения групп из результата... Выражения в HAVING
+    могут ссылаться и на сгруппированные выражения, и на несгруппированные
+    (в которых тогда обязателен агрегат)» (раздел 7.2.3,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).
+    Практическое различие с WHERE документация показывает на примере:
+    «предложение WHERE отбирает строки по несгруппированному столбцу
+    (условие истинно только для продаж за последние четыре недели), а
+    HAVING ограничивает вывод группами с суммарными продажами свыше
+    5000» (там же). То есть <b>WHERE фильтрует строки до группировки,
+    HAVING — группы после</b>.</p>
+
+    <pre><code class="language-sql">SELECT author_id, avg(rating) AS avg_rating
+FROM books
+GROUP BY author_id
+HAVING count(*) > 1
+ORDER BY author_id;</code></pre>
+
+    <pre class="sample-output"> author_id |     avg_rating
+-----------+--------------------
+         1 | 4.5000000000000000
+         3 | 5.0000000000000000
+(2 rows)</pre>
+
+    <p>Что выведено и почему: HAVING оставил только авторов с более чем
+    одной книгой. <code>avg(rating)</code> для Пушкина — (5+4)/2 = 4.5; для
+    Толстого — (5+NULL)/1: avg считает только не-NULL значения, поэтому
+    «Анна Каренина» не участвует ни в сумме, ни в делителе — среднее 5.
+    Заметьте: агрегат в HAVING (<code>count(*)</code>) не обязан совпадать с
+    агрегатами в списке выборки — «агрегатные выражения не обязаны быть
+    одинаковыми во всех частях запроса» (7.2.3).</p>
+
+    <h2>FILTER: агрегат с собственным условием</h2>
+    <p>Одному агрегату можно дать персональный фильтр: «если указан
+    FILTER, то в агрегатную функцию передаются только те входные строки,
+    для которых filter_clause истинен; остальные строки отбрасываются»
+    (раздел 4.2.7 Aggregate Expressions,
+    <a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>).
+    Пример из документации там же, на нашей таблице:</p>
+
+    <pre><code class="language-sql">SELECT count(*) AS total,
+       count(*) FILTER (WHERE rating >= 5) AS five_stars
+FROM books;</code></pre>
+
+    <pre class="sample-output"> total | five_stars
+-------+------------
+     6 |          2
+(1 row)</pre>
+
+    <p>Что выведено и почему: оба агрегата «видят» одни и те же 6 строк,
+    но второй дополнительно пропускает их через условие — книг с оценкой
+    5 и выше у нас две. FILTER удобнее, чем повторный проход JOIN/CASE
+    по тем же строкам. Там же, в 4.2.7, зафиксировано, где агрегаты
+    вообще допустимы: «агрегатное выражение может появляться только в
+    списке результата или предложении HAVING команды SELECT. Оно запрещено
+    в других предложениях, например WHERE, потому что они логически
+    вычисляются до формирования результатов агрегатов».</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>SELECT title, count(*) FROM books;</code>
+      вызывает ошибку, и тремя способами почините запрос.</summary>
+      <p><b>Ответ.</b> count(*) сворачивает все строки в одну, а для
+      <code>title</code> в этой единственной строке нет единственного значения —
+      «столбцы, не перечисленные в GROUP BY, не могут использоваться
+      кроме как в агрегатах» (7.2.3). Варианты: (1) убрать <code>title</code> из
+      списка выборки; (2) добавить <code>GROUP BY title</code>; (3) обернуть
+      <code>title</code> в агрегат, например <code>min(title)</code>. Текст ошибки и точка
+      генерации —
+      <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_agg.c#L1494">src/backend/parser/parse_agg.c#L1494</a>
+      на базовом коммите.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем WHERE отличается от HAVING и почему
+      <code>WHERE count(*) &gt; 1</code> не сработает?</summary>
+      <p><b>Ответ.</b> WHERE фильтрует строки до группировки, HAVING —
+      группы после неё. Агрегатные выражения запрещены в WHERE, потому
+      что WHERE логически вычисляется до формирования результатов
+      агрегатов (раздел 4.2.7
+      <a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>);
+      для фильтра по агрегату есть HAVING.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. В таблице 6 книг, одна без рейтинга. Что вернут
+      <code>count(*)</code>, <code>count(rating)</code> и <code>avg(rating)</code> по всей таблице?</summary>
+      <p><b>Ответ.</b> count(*) = 6 (все строки); count(rating) = 5
+      (только не-NULL); avg(rating) = 21/5 = 4.2 — sum и avg работают с
+      не-NULL значениями (описания count/sum/avg — 9.21
+      <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">/docs/17/functions-aggregate.html</a>).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-03-joins.html">← Предыдущая: 2.3. Соединения JOIN</a>
+      <a class="next" href="02-05-subqueries.html">Следующая: 2.5. Подзапросы →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Table Expressions / GROUP BY and HAVING (7.2.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">Aggregate Functions (9.21)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-expressions.html">Aggregate Expressions / FILTER (4.2.7)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference: GROUP BY Clause)</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-agg.html">Tutorial: Aggregates (2.7)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_agg.c#L1494">src/backend/parser/parse_agg.c#L1494</a>
+        (сообщение об ошибке «must appear in the GROUP BY clause»).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        глава 2, раздел 2.6 «The Relational Algebra» (агрегатные операции),
+        глава 3, раздел 3.7 «Aggregate Functions» (агрегаты в SQL).
+        <a href="https://db-book.com/">db-book.com</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 6.3
+        (агрегатные функции, группировка).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

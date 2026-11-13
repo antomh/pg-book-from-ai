@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.5. JSON и JSONB — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-05-json-jsonb">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.5. JSON и JSONB</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.5. JSON и JSONB</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T16 · PostgreSQL 17.11</p>
+
+    <h2>Настройки пользователя без колонки на каждый чих</h2>
+    <p>У читательского профиля копятся разнородные настройки: тема
+    оформления, лимит книг, набор тегов интересов. Колонку под каждую
+    заводить жалко, а JSON из мобильного приложения уже приезжает
+    готовым. PostgreSQL принимает такие данные в типы <code>json</code> и
+    <code>jsonb</code> — «типы данных JSON предназначены для хранения JSON
+    (JavaScript Object Notation) согласно RFC 7159. Такие данные можно
+    хранить и как text, но JSON-типы дают преимущество: каждый
+    сохранённый объект гарантированно валиден по правилам JSON» (раздел
+    8.14,
+    <a href="https://www.postgresql.org/docs/17/datatype-json.html">/docs/17/datatype-json.html</a>,
+    перевод дословный). Вопрос главы: какой из двух типов выбрать, как
+    по ним запрашивать и когда вместо JSON нужны обычные столбцы.
+    Уровень J+.</p>
+
+    <h2>json против jsonb: два формата хранения</h2>
+    <p>Пометка о границах стандарта: сам тип <code>json</code> соответствует
+    SQL:2016, а <code>jsonb</code> — расширение PostgreSQL, которого в стандарте
+    нет. Разница сформулирована в 8.14 дословно: «json и jsonb принимают
+    практически одинаковые множества значений на вход. Главное
+    практическое различие — в эффективности. Тип json хранит точную
+    копию входного текста, которую функции обработки обязаны
+    заново разбирать при каждом выполнении; jsonb хранится в
+    разобранном (decomposed) бинарном формате, который из-за
+    дополнительной конвертации немного медленнее записывать, но
+    значительно быстрее обрабатывать, так как повторный разбор не
+    нужен. jsonb также поддерживает индексацию, что может стать
+    значительным преимуществом». И решение: «в целом большинство
+    приложений должны предпочитать хранить JSON-данные как jsonb,
+    если нет весьма специфических потребностей».</p>
+    <p>Чем платит jsonb — потерей «текстуальности»: «jsonb не
+    сохраняет пробелы, не сохраняет порядок ключей объекта и не
+    хранит дубликаты ключей объекта. Если во входе заданы дубликаты
+    ключей, сохраняется только последнее значение» (8.14). Демонстрация
+    на данных:</p>
+
+    <pre><code class="language-sql">CREATE TABLE reader_settings (
+    reader_id integer PRIMARY KEY,
+    prefs     jsonb NOT NULL
+);
+
+INSERT INTO reader_settings VALUES
+    (1, '{"theme": "dark",
+        "tags": ["sql", "classic"],
+        "limits": {"max_books": 10}}'),
+    (2, '{"theme": "light", "tags": ["sql"]}');
+
+SELECT prefs FROM reader_settings WHERE reader_id = 1;</code></pre>
+
+    <pre class="sample-output">                                 prefs
+------------------------------------------------------------------------
+ {"tags": ["sql", "classic"], "theme": "dark", "limits": {"max_books": 10}}
+(1 row)</pre>
+
+    <p>Что выведено и почему: jsonb перезаписал документ в своём
+    формате — пробелы исчезли, порядок ключей изменился (сортировка по
+    длине и алфавиту), дубликаты ключей схлопнулись бы в последний.
+    Содержательная часть не изменилась: это те же данные.</p>
+
+    <h2>Операторы доступа: -> и ->&gt;</h2>
+    <p>Операторы из таблицы 9.45
+    (<a href="https://www.postgresql.org/docs/17/functions-json.html">/docs/17/functions-json.html</a>):
+    <code>-&gt;</code> «извлекает поле объекта JSON по ключу» (результат — json) или
+    «n-й элемент JSON-массива (элементы индексируются с нуля, но
+    отрицательные целые считаются с конца)»; <code>-&gt;&gt;</code> — то же, но
+    результат — text. Примеры из таблицы: <code>&#x27;[{&quot;a&quot;:&quot;foo&quot;},
+    {&quot;b&quot;:&quot;bar&quot;}, {&quot;c&quot;:&quot;baz&quot;}]&#x27;::json -&gt; 2</code> → <code>{&quot;c&quot;:&quot;baz&quot;}</code>;
+    <code>&#x27;{&quot;a&quot;: {&quot;b&quot;:&quot;foo&quot;}}&#x27;::json -&gt; &#x27;a&#x27;</code> → <code>{&quot;b&quot;:&quot;foo&quot;}</code>.
+    Осторожно с привычками из главы 3.4: массивы PostgreSQL
+    индексируются с <i>единицы</i>, а JSON-массивы здесь — с нуля;
+    <code>tags[1]</code> и <code>-&gt; 1</code> указывают на разные элементы.</p>
+
+    <pre><code class="language-sql">SELECT prefs -&gt;&gt; 'theme'            AS theme_text,
+       prefs -&gt; 'tags'              AS tags_json,
+       prefs -&gt; 'tags' -&gt;&gt; 0         AS first_tag,
+       prefs -&gt; 'limits' -&gt;&gt; 'max_books' AS max_books
+FROM reader_settings
+WHERE reader_id = 1;</code></pre>
+
+    <pre class="sample-output"> theme_text |      tags_json      | first_tag | max_books
+------------+---------------------+-----------+-----------
+ dark       | ["sql", "classic"]  | sql       | 10
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>-&gt;&gt;</code> вернул текст 'dark'; <code>-&gt;</code> вернул
+    вложенное значение как json; для массива <code>-&gt; 0</code> — первый элемент
+    (индексация с нуля); цепочка <code>-&gt; &#x27;limits&#x27; -&gt;&gt; &#x27;max_books&#x27;</code> прошла
+    вглубь документа. Выбор между операторами — выбор типа результата:
+    json для дальнейшей навигации, text для вывода и сравнения.</p>
+
+    <h2>Вложенность: @&gt; и существование ключей</h2>
+    <p>Раздел 8.14.3 jsonb Containment and Existence: «тест вложенности
+    — важная возможность jsonb; для json аналогичных средств нет.
+    Вложенность проверяет, содержит ли один jsonb-документ в себе
+    другой». Семантика на примерах документации: «простые
+    скалярные/примитивные значения содержат только идентичное
+    значение»; «массив справа содержится в массиве слева» (порядок и
+    дубликаты элементов не важны: <code>&#x27;[1, 2, 3]&#x27;::jsonb @&gt; &#x27;[3, 1]&#x27;</code>
+    и <code>&#x27;[1, 2, 3]&#x27;::jsonb @&gt; &#x27;[1, 2, 2]&#x27;</code> — оба true); «объект с
+    одной парой справа содержится в объекте слева». Операторы
+    существования <code>?</code>/<code>?|</code>/<code>?&amp;</code> проверяют ключи верхнего уровня
+    (таблица 9.46).</p>
+
+    <pre><code class="language-sql">SELECT reader_id,
+       prefs @> '{"tags": ["classic"]}' AS likes_classic,
+       prefs ? 'limits'                  AS has_limits
+FROM reader_settings;</code></pre>
+
+    <pre class="sample-output"> reader_id | likes_classic | has_limits
+-----------+--------------+------------
+         1 | t            | t
+         2 | f            | f
+(2 rows)</pre>
+
+    <p>Что выведено и почему: у первого профиля массив tags содержит
+    'classic' (элемент множества, независимо от порядка), и ключ
+    'limits' существует; у второго — ни то, ни другое. Для jsonb есть
+    и обычные операторы сравнения (9.16: «обычные операторы сравнения
+    из таблицы 9.1 доступны для jsonb, но не для json») — ещё одно
+    практическое отличие типов.</p>
+
+    <h2>Индексация jsonb: GIN</h2>
+    <p>Раздел 8.14.4 jsonb Indexing: «GIN-индексы можно использовать
+    для эффективного поиска ключей или пар ключ/значение, встречающихся
+    в большом числе jsonb-документов. Предоставляются два класса
+    операторов GIN с разными компромиссами производительности и
+    гибкости». Класс по умолчанию <code>jsonb_ops</code> поддерживает запросы с
+    <code>?</code>, <code>?|</code>, <code>?&amp;</code>, <code>@&gt;</code> и jsonpath-операторами; нестандартный
+    <code>jsonb_path_ops</code> — только <code>@&gt;</code> и jsonpath-операторы, зато
+    «индекс jsonb_path_ops обычно значительно меньше индекса jsonb_ops
+    на тех же данных, и специфичность поиска лучше» (8.14.4; детально
+    индексы — глава 8.4 этого учебника):</p>
+
+    <pre><code class="language-sql">CREATE INDEX reader_settings_prefs_gin
+    ON reader_settings USING GIN (prefs);</code></pre>
+
+    <p>Что произойдёт и почему: после создания GIN-индекса запросы вида
+    <code>WHERE prefs @&gt; &#x27;{&quot;theme&quot;: &quot;dark&quot;}&#x27;</code> и <code>WHERE prefs ?
+    &#x27;limits&#x27;</code> смогут использовать индекс вместо разбора каждой строки
+    — то самое «jsonb поддерживает индексацию» из 8.14.</p>
+
+    <h2>JSON или реляционные столбцы?</h2>
+    <p>Правило такое же, как с массивами из главы 3.4, но строже:
+    JSON-документ — атрибут строки целиком. Внутри документа нет
+    ссылочной целостности, типизированных столбцов и дешёвых
+    ограничений — «документ валиден по правилам JSON», и только.
+    Настройки профиля, payload вебхука, ответ внешнего API —
+    типичные jsonb-сценарии. Как только полю нужна уникальность,
+    внешний ключ, точный тип или статистика по значениям — это
+    столбец таблицы (модуль 4). Документация предупреждает и об
+    «обратном» дизайне: в 8.14.2 «Designing JSON Documents» данные
+    должны быть адаптированы к модели вложенности jsonb, чтобы
+    операторы <code>@&gt;</code>/<code>?</code> работали эффективно (там же разбирается
+    пример таблицы api с GIN-индексом по полю jdoc).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему «большинство приложений должны
+      предпочитать jsonb»? Назовите два свойства, которыми платит
+      jsonb.</summary>
+      <p><b>Ответ.</b> jsonb быстрее обрабатывается («повторный разбор
+      не нужен») и поддерживает индексацию (GIN); плата — «не
+      сохраняет пробелы, не сохраняет порядок ключей объекта и не
+      хранит дубликаты ключей: сохраняется только последнее значение»
+      (8.14). json оставляют при «весьма специфических потребностях»,
+      например legacy-зависимости от порядка ключей.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем prefs -> 'tags' отличается от prefs ->>
+      'tags' и почему prefs -> 'tags' ->> 0 вернёт "sql", а не
+      "classic"?</summary>
+      <p><b>Ответ.</b> <code>-&gt;</code> возвращает json (вложенное значение,
+      пригодное для дальнейшей навигации), <code>-&gt;&gt;</code> — text. Элементы
+      JSON-массива индексируются с нуля (таблица 9.45: «array
+      elements are indexed from zero, but negative integers count
+      from the end»), поэтому индекс 0 — первый элемент 'sql';
+      'classic' — индекс 1.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Верно ли, что '{"a": 1, "b": 2}'::jsonb @>
+      '{"b": 2}' и '[1, 2, 3]'::jsonb @> '[3, 1]'? Какое из выражений
+      с json-типом вместо jsonb так проверить нельзя?</summary>
+      <p><b>Ответ.</b> Оба верны: объект справа с одной парой
+      содержится в объекте слева; для массивов порядок и дубликаты
+      элементов не важны (примеры — 8.14.3). Любое из них: «тест
+      вложенности — важная возможность jsonb; для json аналогичных
+      средств нет» (8.14.3).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-04-arrays.html">← Предыдущая: 3.4. Массивы</a>
+      <a class="next" href="03-06-type-conversion.html">Следующая: 3.6. Приведение и разрешение типов →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/datatype-json.html">JSON Types (8.14: Input/Output, Designing JSON Documents, Containment and Existence, Indexing)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-json.html">JSON Functions and Operators (9.16, таблицы 9.45–9.46)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 4.6
+        (JSON/JSONB).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

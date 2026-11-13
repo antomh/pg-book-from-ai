@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Интерактивный учебник по PostgreSQL 17 — оглавление</title>
+<link rel="stylesheet" href="css/book.css">
+<link rel="stylesheet" href="css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="js/vendor/highlight.min.js" defer></script>
+<script src="js/nav.js" defer></script>
+<script src="js/book.js" defer></script>
+</head>
+<body data-page="index">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <span aria-current="page">Оглавление</span>
+  </nav>
+</header>
+<main class="content content-wide" id="content">
+  <h1>Интерактивный учебник по PostgreSQL</h1>
+  <p class="chapter-meta">PostgreSQL 17.11 · документация /docs/17/ · код на коммите 083ac033419f690758508e08c1736089384bbee8</p>
+  <p>Учебник для разработчиков: от реляционной модели до MVCC, индексов и чтения планов
+     EXPLAIN. Все примеры статичны и выполняются только в вашей голове; интерактивность —
+     навигация, сворачиваемые пояснения и вопросы «Проверь себя» с эталонными ответами.</p>
+  <p class="legend"><b>Уровни:</b> <span class="badge badge-j">J</span> — junior, обязательно;
+     <span class="badge badge-jp">J+</span> — junior+, желательно.</p>
+  <section class="module" id="m01">
+    <h2>Модуль 1. Основы и реляционная модель</h2>
+    <p class="module-desc">Зачем нужны СУБД, реляционная модель, организация PostgreSQL, навигация по каталогу.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/01-01-db-and-relational-model.html">Глава 1.1. Что такое базы данных и реляционная модель</a> <span class="badge badge-j">J</span> <span class="dag">T01</span></li>
+      <li><a href="modules/01-02-cluster-database-role-psql.html">Глава 1.2. Кластер, база данных, роль; psql</a> <span class="badge badge-j">J</span> <span class="dag">T02</span></li>
+      <li><a href="modules/01-03-system-catalog.html">Глава 1.3. Системный каталог и information_schema</a> <span class="badge badge-jp">J+</span> <span class="dag">T03</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m02">
+    <h2>Модуль 2. Запросы SELECT</h2>
+    <p class="module-desc">Язык запросов: от проекции и фильтрации до оконных функций.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/02-01-select-where-null.html">Глава 2.1. SELECT: проекция, WHERE, NULL и трёхзначная логика</a> <span class="badge badge-j">J</span> <span class="dag">T04</span></li>
+      <li><a href="modules/02-02-order-limit-distinct.html">Глава 2.2. Сортировка, LIMIT/OFFSET, DISTINCT</a> <span class="badge badge-j">J</span> <span class="dag">T05</span></li>
+      <li><a href="modules/02-03-joins.html">Глава 2.3. Соединения JOIN</a> <span class="badge badge-j">J</span> <span class="dag">T06</span></li>
+      <li><a href="modules/02-04-group-by-having.html">Глава 2.4. Агрегация: GROUP BY и HAVING</a> <span class="badge badge-j">J</span> <span class="dag">T07</span></li>
+      <li><a href="modules/02-05-subqueries.html">Глава 2.5. Подзапросы</a> <span class="badge badge-j">J</span> <span class="dag">T08</span></li>
+      <li><a href="modules/02-06-cte-with.html">Глава 2.6. Общие табличные выражения (WITH)</a> <span class="badge badge-j">J</span> <span class="dag">T09</span></li>
+      <li><a href="modules/02-07-recursive-cte.html">Глава 2.7. Рекурсивные CTE</a> <span class="badge badge-jp">J+</span> <span class="dag">T10</span></li>
+      <li><a href="modules/02-08-window-functions.html">Глава 2.8. Оконные функции</a> <span class="badge badge-jp">J+</span> <span class="dag">T11</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m03">
+    <h2>Модуль 3. Типы данных</h2>
+    <p class="module-desc">Встроенные типы PostgreSQL и правила приведения.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/03-01-numeric-text-types.html">Глава 3.1. Числовые и строковые типы</a> <span class="badge badge-j">J</span> <span class="dag">T12</span></li>
+      <li><a href="modules/03-02-datetime-types.html">Глава 3.2. Дата и время</a> <span class="badge badge-j">J</span> <span class="dag">T13</span></li>
+      <li><a href="modules/03-03-boolean-uuid-enum.html">Глава 3.3. boolean, uuid, enum</a> <span class="badge badge-j">J</span> <span class="dag">T14</span></li>
+      <li><a href="modules/03-04-arrays.html">Глава 3.4. Массивы</a> <span class="badge badge-jp">J+</span> <span class="dag">T15</span></li>
+      <li><a href="modules/03-05-json-jsonb.html">Глава 3.5. JSON и JSONB</a> <span class="badge badge-jp">J+</span> <span class="dag">T16</span></li>
+      <li><a href="modules/03-06-type-conversion.html">Глава 3.6. Приведение и разрешение типов</a> <span class="badge badge-j">J</span> <span class="dag">T17</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m04">
+    <h2>Модуль 4. DDL и проектирование схем</h2>
+    <p class="module-desc">Создание таблиц, ограничения, нормализация, представления, схемы, партиционирование.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/04-01-create-table.html">Глава 4.1. CREATE TABLE: столбцы, DEFAULT, идентификаторы</a> <span class="badge badge-j">J</span> <span class="dag">T18</span></li>
+      <li><a href="modules/04-02-constraints.html">Глава 4.2. Ограничения: NOT NULL, UNIQUE, PK, FK, CHECK</a> <span class="badge badge-j">J</span> <span class="dag">T19</span></li>
+      <li><a href="modules/04-03-normalization-and-relations.html">Глава 4.3. Связи и нормализация</a> <span class="badge badge-j">J</span> <span class="dag">T20</span></li>
+      <li><a href="modules/04-04-alter-table-views.html">Глава 4.4. ALTER TABLE и представления</a> <span class="badge badge-j">J</span> <span class="dag">T21</span></li>
+      <li><a href="modules/04-05-schemas-search-path.html">Глава 4.5. Схемы и search_path</a> <span class="badge badge-jp">J+</span> <span class="dag">T22</span></li>
+      <li><a href="modules/04-06-sequences-identity.html">Глава 4.6. Последовательности: SERIAL и GENERATED AS IDENTITY</a> <span class="badge badge-j">J</span> <span class="dag">T23</span></li>
+      <li><a href="modules/04-07-partitioning.html">Глава 4.7. Декларативное партиционирование</a> <span class="badge badge-jp">J+</span> <span class="dag">T24</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m05">
+    <h2>Модуль 5. Изменение данных</h2>
+    <p class="module-desc">INSERT, UPDATE, DELETE и возврат изменённых строк.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/05-01-insert-on-conflict.html">Глава 5.1. INSERT и ON CONFLICT</a> <span class="badge badge-j">J</span> <span class="dag">T25</span></li>
+      <li><a href="modules/05-02-update-delete-returning.html">Глава 5.2. UPDATE, DELETE, RETURNING</a> <span class="badge badge-j">J</span> <span class="dag">T26</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m06">
+    <h2>Модуль 6. Транзакции и конкурентность</h2>
+    <p class="module-desc">ACID, уровни изоляции, MVCC, блокировки, очистка.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/06-01-transactions-acid.html">Глава 6.1. Транзакции и ACID</a> <span class="badge badge-j">J</span> <span class="dag">T27</span></li>
+      <li><a href="modules/06-02-savepoints-errors.html">Глава 6.2. Savepoints и обработка ошибок</a> <span class="badge badge-jp">J+</span> <span class="dag">T28</span></li>
+      <li><a href="modules/06-03-isolation-levels.html">Глава 6.3. Уровни изоляции и аномалии</a> <span class="badge badge-j">J</span> <span class="dag">T29</span></li>
+      <li><a href="modules/06-04-mvcc.html">Глава 6.4. MVCC: версии строк и снимки</a> <span class="badge badge-j">J</span> <span class="dag">T30</span></li>
+      <li><a href="modules/06-05-serializable-ssi.html">Глава 6.5. SERIALIZABLE и SSI</a> <span class="badge badge-jp">J+</span> <span class="dag">T31</span></li>
+      <li><a href="modules/06-06-locking.html">Глава 6.6. Блокировки и тупики</a> <span class="badge badge-j">J</span> <span class="dag">T32</span></li>
+      <li><a href="modules/06-07-vacuum.html">Глава 6.7. VACUUM: зачем чистить мёртвые версии</a> <span class="badge badge-j">J</span> <span class="dag">T33</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m07">
+    <h2>Модуль 7. Хранение данных внутри</h2>
+    <p class="module-desc">Процессы, страницы, кортежи, TOAST — на концептуальном уровне.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/07-01-process-architecture.html">Глава 7.1. Архитектура процессов и памяти</a> <span class="badge badge-jp">J+</span> <span class="dag">T34</span></li>
+      <li><a href="modules/07-02-pages-tuples.html">Глава 7.2. Страницы данных и кортежи</a> <span class="badge badge-jp">J+</span> <span class="dag">T35</span></li>
+      <li><a href="modules/07-03-toast.html">Глава 7.3. TOAST: хранение больших значений</a> <span class="badge badge-jp">J+</span> <span class="dag">T36</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m08">
+    <h2>Модуль 8. Индексы</h2>
+    <p class="module-desc">B-tree и другие методы доступа, index-only scan.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/08-01-btree.html">Глава 8.1. B-tree: устройство и применение</a> <span class="badge badge-j">J</span> <span class="dag">T37</span></li>
+      <li><a href="modules/08-02-composite-partial-expressions.html">Глава 8.2. Составные, частичные индексы и индексы на выражениях</a> <span class="badge badge-jp">J+</span> <span class="dag">T38</span></li>
+      <li><a href="modules/08-03-index-only-scan.html">Глава 8.3. Index-only scan и карта видимости</a> <span class="badge badge-jp">J+</span> <span class="dag">T39</span></li>
+      <li><a href="modules/08-04-other-index-methods.html">Глава 8.4. Другие методы: hash, GIN, GiST, SP-GiST, BRIN</a> <span class="badge badge-jp">J+</span> <span class="dag">T40</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m09">
+    <h2>Модуль 9. Планировщик и EXPLAIN</h2>
+    <p class="module-desc">Путь запроса, статистика, чтение планов.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/09-01-query-path.html">Глава 9.1. Путь запроса: от текста до результата</a> <span class="badge badge-j">J</span> <span class="dag">T41</span></li>
+      <li><a href="modules/09-02-planner-statistics.html">Глава 9.2. Статистика планировщика</a> <span class="badge badge-jp">J+</span> <span class="dag">T42</span></li>
+      <li><a href="modules/09-03-explain.html">Глава 9.3. EXPLAIN: чтение плана</a> <span class="badge badge-j">J</span> <span class="dag">T43</span></li>
+      <li><a href="modules/09-04-scan-join-methods.html">Глава 9.4. Методы доступа и соединения в планах</a> <span class="badge badge-j">J</span> <span class="dag">T44</span></li>
+      <li><a href="modules/09-05-sort-aggregation-cost.html">Глава 9.5. Сортировка, агрегация и стоимость</a> <span class="badge badge-jp">J+</span> <span class="dag">T45</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m10">
+    <h2>Модуль 10. Серверное программирование</h2>
+    <p class="module-desc">Функции SQL, PL/pgSQL, триггеры, процедуры.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/10-01-sql-functions.html">Глава 10.1. Функции на SQL</a> <span class="badge badge-j">J</span> <span class="dag">T46</span></li>
+      <li><a href="modules/10-02-plpgsql.html">Глава 10.2. PL/pgSQL</a> <span class="badge badge-jp">J+</span> <span class="dag">T47</span></li>
+      <li><a href="modules/10-03-triggers.html">Глава 10.3. Триггеры</a> <span class="badge badge-jp">J+</span> <span class="dag">T48</span></li>
+      <li><a href="modules/10-04-procedures-call.html">Глава 10.4. Процедуры и CALL</a> <span class="badge badge-jp">J+</span> <span class="dag">T49</span></li>
+    </ul>
+  </section>
+  <section class="module" id="m11">
+    <h2>Модуль 11. Безопасность разработчика</h2>
+    <p class="module-desc">Роли, привилегии, Row-Level Security.</p>
+    <ul class="chapter-list">
+      <li><a href="modules/11-01-roles-privileges.html">Глава 11.1. Роли, привилегии, владение</a> <span class="badge badge-j">J</span> <span class="dag">T50</span></li>
+      <li><a href="modules/11-02-row-level-security.html">Глава 11.2. Row-Level Security</a> <span class="badge badge-jp">J+</span> <span class="dag">T51</span></li>
+    </ul>
+  </section>
+  <footer class="footer">
+    <p>Правила проекта: <code>00_rules.md</code> · карта тем: <code>01_analysis_and_topic_map.md</code> ·
+       оглавление: <code>02_outline.md</code>.</p>
+  </footer>
+</main>
+</body>
+</html>

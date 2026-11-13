@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.1. SELECT: проекция, WHERE, NULL и трёхзначная логика — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-01-select-where-null">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.1. SELECT: проекция, WHERE, NULL и трёхзначная логика</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.1. SELECT: проекция, WHERE, NULL и трёхзначная логика</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T04 · PostgreSQL 17.11</p>
+
+    <h2>Почему запрос «покажи книги без оценки» ничего не находит</h2>
+    <p>Разработчик пишет первый серьёзный запрос: у части книг в поле
+    <code>rating</code> нет значения, и нужно вывести именно их. Естественная попытка:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books WHERE rating = NULL;</code></pre>
+
+    <p>Что будет выведено и почему: ничего — всегда, при любых данных,
+    <code>(0 rows)</code>. Запрос синтаксически корректен и не вызывает
+    ошибки, поэтому ловушка не обнаруживается сразу. Разбор, почему так
+    устроен SQL и как писать проверки правильно, — содержание этой
+    главы. Попутно разберём общий каркас запроса: что именно делает
+    <code>SELECT</code>, как читается конвейер <code>FROM → WHERE → список выборки</code>, и
+    почему это важно понимать до изучения JOIN и агрегатов.</p>
+
+    <h2>Учебные данные модуля</h2>
+    <p>Модули 2–5 работают с одной и той же предметной областью
+    «читательский дневник». Полный набор данных на этот модуль:</p>
+
+    <pre><code class="language-sql">CREATE TABLE authors (
+    author_id  integer PRIMARY KEY,
+    name       text    NOT NULL
+);
+
+CREATE TABLE books (
+    book_id    integer PRIMARY KEY,
+    title      text    NOT NULL,
+    author_id  integer REFERENCES authors (author_id),
+    year       integer,
+    rating     integer
+);
+
+INSERT INTO authors VALUES
+    (1, 'Александр Пушкин'),
+    (2, 'Николай Гоголь'),
+    (3, 'Лев Толстой');
+
+INSERT INTO books VALUES
+    (1, 'Евгений Онегин',   1, 1833, 5),
+    (2, 'Руслан и Людмила', 1, 1820, 4),
+    (3, 'Мёртвые души',     2, 1842, 4),
+    (4, 'Война и мир',      3, 1869, 5),
+    (5, 'Анна Каренина',    3, 1878, NULL),
+    (6, 'Детектив XXI века', NULL, 2021, 3);</code></pre>
+
+    <p>Синтаксис вставки строк —
+    <a href="https://www.postgresql.org/docs/17/sql-insert.html">/docs/17/sql-insert.html</a>;
+    конструкторы значений <code>VALUES</code> —
+    <a href="https://www.postgresql.org/docs/17/queries-values.html">/docs/17/queries-values.html</a>.
+    Две строки здесь принципиальны для примеров NULL: у «Анны Карениной»
+    нет оценки, у «Детектива» не указан автор.</p>
+
+    <h2>Минимум теории: что такое запрос</h2>
+    <p>«Процесс выборки данных из базы (или команда для такой выборки)
+    называется запросом. В SQL для задания запросов используется команда
+    SELECT» — так начинает раздел «Overview» документации
+    (<a href="https://www.postgresql.org/docs/17/queries-overview.html">/docs/17/queries-overview.html</a>,
+    7.1; перевод дословный). Общий вид команды там же:</p>
+
+    <pre><code class="language-sql">[ WITH with_queries ] SELECT select_list FROM table_expression [ sort_specification ]</code></pre>
+
+    <p>Выполнение запроса документация описывает как <b>конвейер</b>:
+    «табличное выражение содержит предложение FROM, за которым
+    необязательно следуют WHERE, GROUP BY и HAVING. Необязательные
+    предложения WHERE, GROUP BY и HAVING задают конвейер последовательных
+    преобразований таблицы, полученной в предложении FROM. Все эти
+    преобразования порождают виртуальную таблицу, строки которой
+    передаются в список выборки для вычисления выходных строк запроса»
+    (раздел 7.2 Table Expressions,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).
+    Список выборки «определяет, какие столбцы промежуточной таблицы
+    реально попадут в вывод» (7.3 Select Lists,
+    <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>).</p>
+    <p>Запомним порядок: <b>сначала фильтрация строк (WHERE), затем
+    вычисление выражений списка выборки</b>. На этом порядке построена
+    глава 2.8: оконные функции нельзя вызывать в WHERE именно потому, что
+    WHERE выполняется раньше них.</p>
+
+    <h2>Список выборки: проекция</h2>
+    <p>«Простейший вид списка выборки — <code>*</code>, выдающий все
+    столбцы, которые порождает табличное выражение. В остальных случаях
+    список выборки — это разделённый запятыми список <b>выражений
+    значений</b>» (7.3.1,
+    <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>;
+    что считается выражением значения — раздел 4.2 Value Expressions,
+    <a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>).
+    Выражение — это не только столбец: арифметика, вызовы функций,
+    константы. Метку столбца задаёт <code>AS</code> (7.3.2 там же):</p>
+
+    <pre><code class="language-sql">SELECT title,
+       2026 - year AS age_years,
+       rating IS NULL AS unrated
+FROM books;</code></pre>
+
+    <pre class="sample-output">      title       | age_years | unrated
+------------------+-----------+---------
+ Евгений Онегин   |       193 | f
+ Руслан и Людмила |       206 | f
+ Мёртвые души     |       184 | f
+ Война и мир      |       157 | f
+ Анна Каренина    |       148 | t
+ Детектив XXI века|        5 | f
+(6 rows)</pre>
+
+    <p>Что выведено и почему: по строке на каждую книгу (фильтрации
+    нет); каждому столбцу результата соответствует одно выражение
+    списка; <code>age_years</code> вычислено из года издания; в последнем столбце —
+    булев результат предиката <code>IS NULL</code>. Заметьте: NULL-поле
+    «Детектива» (<code>author_id</code>) не участвует в выражениях, а NULL в
+    <code>rating</code> «Анны Карениной» отражён как <code>t</code> в <code>unrated</code> — предикат
+    <code>IS NULL</code> как раз и возвращает TRUE для отсутствующего значения.</p>
+
+    <details class="box">
+      <summary>Замечание: SELECT без FROM — расширение PostgreSQL</summary>
+      <p>PostgreSQL разрешает опустить <code>FROM</code> и вычислять выражения
+      напрямую: <code>SELECT 2+2;</code>. В разделе Compatibility
+      справочной страницы SELECT это указано как расширение относительно
+      стандарта («PostgreSQL allows one to omit the FROM clause...») —
+      <a href="https://www.postgresql.org/docs/17/sql-select.html">/docs/17/sql-select.html</a>.
+      В других СУБД для этого иногда требуется фиктивная таблица.</p>
+    </details>
+
+    <h2>WHERE: фильтр строк</h2>
+    <p>Формальное определение — раздел 7.2.2 «The WHERE Clause»
+    (<a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>):
+    «синтаксис: <code>WHERE search_condition</code>, где <code>search_condition</code> — любое
+    выражение значения, возвращающее значение типа boolean. После
+    обработки предложения FROM каждая строка полученной виртуальной
+    таблицы проверяется на условие поиска. Если результат условия —
+    истина, строка остаётся в выходной таблице, иначе (то есть если
+    результат — ложь <b>или NULL</b>) она отбрасывается».</p>
+    <p>Курсив на «или NULL» — ключевая часть. Условие WHERE — не
+    «двухпозиционный» фильтр: в SQL у логического выражения три
+    возможных исхода, и в WHERE выживает только TRUE.</p>
+
+    <h2>NULL и трёхзначная логика</h2>
+    <p>NULL — это не ноль и не пустая строка, а маркер «значение
+    отсутствует/неизвестно». Документация формулирует так: «не пишите
+    <code>expression = NULL</code>, потому что NULL не "равен" NULL. (NULL
+    представляет неизвестное значение, и неизвестно, равны ли два
+    неизвестных значения.)» — раздел 9.2 Comparison Functions and
+    Operators,
+    <a href="https://www.postgresql.org/docs/17/functions-comparison.html">/docs/17/functions-comparison.html</a>.
+    Отсюда и результат первого запроса главы: <code>rating = NULL</code> даёт не
+    TRUE и не FALSE, а NULL — и строка отбрасывается. Все строки.</p>
+    <p>Как ведёт себя NULL в логических операторах — таблицы истинности
+    раздела 9.1 Logical Operators
+    (<a href="https://www.postgresql.org/docs/17/functions-logical.html">/docs/17/functions-logical.html</a>;
+    «SQL использует трёхзначную логику: true, false и null, где null
+    означает "неизвестно"»):</p>
+    <table>
+      <thead><tr><th>a</th><th>b</th><th>a AND b</th><th>a OR b</th></tr></thead>
+      <tbody>
+        <tr><td>TRUE</td><td>NULL</td><td>NULL</td><td>TRUE</td></tr>
+        <tr><td>FALSE</td><td>NULL</td><td>FALSE</td><td>NULL</td></tr>
+        <tr><td>NULL</td><td>NULL</td><td>NULL</td><td>NULL</td></tr>
+      </tbody>
+    </table>
+    <p>и <code>NOT NULL → NULL</code>. Правило простое: NULL «заражает» выражение,
+    если результат нельзя определить без неизвестного (FALSE AND NULL =
+    FALSE — результат уже решён ложью первой части; TRUE OR NULL = TRUE —
+    аналогично). Это стандартное поведение SQL, а не особенность
+    PostgreSQL (Silberschatz, <i>Database System Concepts</i>, 7-е изд.,
+    глава 3, раздел «Null Values»).</p>
+
+    <h2>Правильные проверки: IS NULL и IS DISTINCT FROM</h2>
+    <p>Чтобы найти отсутствующее значение, есть специальный предикат:
+    «<code>expression IS NULL</code> — проверить, что значение равно null»
+    (раздел 9.2,
+    <a href="https://www.postgresql.org/docs/17/functions-comparison.html">/docs/17/functions-comparison.html</a>).
+    Он возвращает TRUE/FALSE, никогда NULL:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books WHERE rating IS NULL;</code></pre>
+
+    <pre class="sample-output">     title
+---------------
+ Анна Каренина
+(1 row)</pre>
+
+    <p>Обратная проверка — <code>IS NOT NULL</code>: «выражение <code>IS NOT
+    NULL</code> — проверить, что значение не равно null» (там же).
+    «Книги с известной оценкой»:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books WHERE rating IS NOT NULL;</code></pre>
+
+    <pre class="sample-output">      title
+---------------
+ Евгений Онегин
+ Руслан и Людмила
+ Мёртвые души
+ Война и мир
+ Детектив XXI века
+(5 rows)</pre>
+
+    <p>Что выведено и почему: пять книг из шести с известным рейтингом;
+    «Анна Каренина» без рейтинга не прошла проверку — её и нашёл
+    запрос выше.</p>
+
+    <p>Для сравнения «на неравенство, где NULL — обычное сравнимое
+    значение» документация предлагает <code>IS DISTINCT FROM</code>: «не равно, где
+    null трактуется как сравнимое значение. <code>1 IS DISTINCT FROM NULL →
+    t</code> (а не NULL). <code>NULL IS DISTINCT FROM NULL → f</code>» (там же). Это
+    двухзначный оператор — выход всегда TRUE/FALSE.</p>
+    <p>Наконец, частый приём «либо равен X, либо NULL» — именно
+    двухзначные предикаты, объединённые явно:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books
+WHERE rating = 4 OR rating IS NULL;</code></pre>
+
+    <pre class="sample-output">      title
+----------------
+ Руслан и Людмила
+ Мёртвые души
+ Анна Каренина
+(3 rows)</pre>
+
+    <p>Что выведено и почему: три строки — две с рейтингом 4 и одна
+    без рейтинга; уберите <code>OR rating IS NULL</code> — останутся две, потому
+    что <code>rating = 4</code> для NULL-строки даёт NULL, а не TRUE.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Что вернёт <code>SELECT count(*) FROM books WHERE
+      rating = NULL;</code> и почему?</summary>
+      <p><b>Ответ.</b> Ноль строк при любых данных: <code>rating = NULL</code>
+      вычисляется в NULL (NULL не «равен» NULL), а WHERE пропускает
+      строку только при TRUE — «ложь или NULL» отбрасываются (разделы
+      7.2.2 и 9.2 документации:
+      <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">queries-table-expressions.html</a>,
+      <a href="https://www.postgresql.org/docs/17/functions-comparison.html">functions-comparison.html</a>).
+      Правильно — <code>WHERE rating IS NULL</code>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Вычислите без запуска: чему равно
+      <code>rating &gt; 3 AND NOT (author_id IS NULL)</code> для книги «Анна Каренина»
+      (rating = NULL, author_id = 3) и для «Детектива» (rating = 3,
+      author_id = NULL)?</summary>
+      <p><b>Ответ.</b> «Анна Каренина»: <code>NULL &gt; 3</code> — NULL; <code>NOT (3 IS
+      NULL)</code> — NOT FALSE = TRUE; <code>NULL AND TRUE</code> = NULL → строка
+      отброшена. «Детектив»: <code>3 &gt; 3</code> — FALSE; <code>NOT (NULL IS NULL)</code> —
+      NOT TRUE = FALSE; <code>FALSE AND FALSE</code> = FALSE → отброшена. Обе строки
+      не попадут в результат; таблицы истинности AND/OR/NOT с NULL —
+      <a href="https://www.postgresql.org/docs/17/functions-logical.html">/docs/17/functions-logical.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем <code>author_id IS DISTINCT FROM 1</code> отличается от
+      <code>author_id &lt;&gt; 1</code> на наших данных?</summary>
+      <p><b>Ответ.</b> «Детектив» (author_id = NULL): <code>&lt;&gt; 1</code> даёт
+      NULL → строка отбрасывается; <code>IS DISTINCT FROM 1</code> даёт TRUE →
+      строка остаётся, потому что «отсутствует» считается значением,
+      отличным от 1. На остальных строках результаты совпадают.
+      Семантика <code>IS [NOT] DISTINCT FROM</code> —
+      <a href="https://www.postgresql.org/docs/17/functions-comparison.html">/docs/17/functions-comparison.html</a>.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="01-03-system-catalog.html">← Предыдущая: 1.3. Системный каталог и information_schema</a>
+      <a class="next" href="02-02-order-limit-distinct.html">Следующая: 2.2. Сортировка, LIMIT/OFFSET, DISTINCT →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/queries-overview.html">Queries: Overview (7.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Table Expressions (7.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">Select Lists (7.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-expressions.html">Value Expressions (4.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-logical.html">Logical Operators (9.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-comparison.html">Comparison Functions and Operators (9.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference, Compatibility)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-insert.html">INSERT</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-values.html">VALUES Lists (7.7)</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        глава 3, раздел «Null Values» (трёхзначная логика по стандарту SQL).
+        <a href="https://db-book.com/">db-book.com</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

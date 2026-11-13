@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 7.3. TOAST — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="07-03-toast">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m07">Модуль 7. Хранение внутри</a> /
+    <span aria-current="page">Глава 7.3. TOAST: хранение больших значений</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 7.3. TOAST: хранение больших значений</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T36 · PostgreSQL 17.11</p>
+
+    <h2>Текст в 54 килобайта вставился в таблицу со страницами по 8 КБ</h2>
+    <p>Глава 7.2 закончилась жёстким правилом: «PostgreSQL
+    использует фиксированный размер страницы (обычно 8 КБ) и не
+    позволяет кортежам пересекать несколько страниц»
+    (<a href="https://www.postgresql.org/docs/17/storage-toast.html">/docs/17/storage-toast.html</a>,
+    65.2, перевод дословный). Но <code>text</code>-поле принимает отзыв на
+    десятки килобайт — без ошибок и без расширения страницы.
+    Куда деваются байты? Ответ — механизм с честным самоназванием:
+    «поэтому невозможно хранить очень большие значения полей
+    напрямую. Чтобы преодолеть это ограничение, большие значения
+    полей сжимаются и/или разбиваются на несколько физических
+    строк. Это происходит прозрачно для пользователя... Техника
+    ласково известна как TOAST (или "лучшая вещь после нарезанного
+    хлеба")» (65.2, дословно; TOAST — The Oversized-Attribute
+    Storage Technique). Разберём, когда срабатывает триггер, куда
+    пишутся данные и как управлять стратегией хранения.</p>
+
+    <h2>Кто умеет «тостироваться», и где хранится вынесенное</h2>
+    <p>Не каждый тип участвует: «только некоторые типы данных
+    поддерживают TOAST — нет необходимости накладывать накладные
+    расходы на типы, которые не могут давать больших значений
+    полей. Чтобы поддерживать TOAST, тип данных должен иметь
+    переменно-длинное (varlena) представление» (65.2). К
+    TOAST-able типам относятся <code>text</code>, <code>varchar</code>, <code>bytea</code>,
+    <code>jsonb</code> — любые, у которых длина не фиксирована; <code>int</code>
+    или <code>date</code> в этом не нуждаются. Хранилище вынесенных
+    значений — отдельная служебная таблица: «если какие-либо
+    столбцы таблицы TOAST-able, таблица будет иметь связанную
+    TOAST-таблицу, чей OID хранится в записи pg_class.reltoastrelid
+    таблицы» (65.2.1). Значение нарезается: «вынесенные из строки
+    значения делятся (после сжатия, если оно применялось) на
+    куски (chunks) размером не более TOAST_MAX_CHUNK_SIZE байт
+    (по умолчанию это значение выбирается так, чтобы четыре
+    строки-куска поместились на страницу, что даёт около 2000
+    байт). Каждый кусок хранится как отдельная строка в TOAST-таблице,
+    принадлежащей таблице-владельцу. Каждая TOAST-таблица имеет
+    столбцы chunk_id (OID, идентифицирующий конкретное
+    тостированное значение), chunk_seq (порядковый номер куска
+    внутри значения) и chunk_data (собственно данные куска).
+    Уникальный индекс по chunk_id и chunk_seq обеспечивает
+    быстрое извлечение значений» (65.2.1, дословно). А в самой
+    строке-владельце остаётся только указатель: «указатель...
+    должен хранить OID TOAST-таблицы... и OID конкретного
+    значения (его chunk_id)... общий размер указателя на диске
+    — 18 байт независимо от фактического размера представляемого
+    значения» (65.2.1).</p>
+
+    <h2>Порог срабатывания</h2>
+    <p>«Код управления TOAST запускается только тогда, когда
+    значение строки для сохранения в таблицу шире, чем
+    TOAST_TUPLE_THRESHOLD байт (обычно 2 КБ). Код TOAST будет
+    сжимать и/или выносить значения полей из строки, пока
+    значение строки не станет короче, чем TOAST_TUPLE_TARGET
+    байт (тоже обычно 2 КБ, с возможностью настройки), или пока
+    больше выгоды получить нельзя» (65.2.1, дословно). Числа
+    не магические: в коде порог привязан к странице —
+    <code>src/include/access/heaptoast.h</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>:
+    <code>TOAST_TUPLES_PER_PAGE</code> = 4 (строка 45) и
+    <code>TOAST_TUPLE_THRESHOLD</code> = «наибольший размер кортежа, для
+    которого на heap-страницу помещаются 4 кортежа» (строка 48;
+    комментарий выше: «выбираем оба значения так, чтобы
+    соответствовать наибольшему размеру кортежа, при котором
+    TOAST_TUPLES_PER_PAGE кортежей помещаются на heap-страницу»).</p>
+
+    <h2>Четыре стратегии хранения</h2>
+    <p>Как именно поступать с конкретным столбцом, задаёт
+    стратегия. «Код управления TOAST распознаёт четыре разные
+    стратегии хранения TOAST-able столбцов на диске» (65.2,
+    дословно):</p>
+    <table class="data-table">
+      <thead>
+        <tr><th>Стратегия</th><th>Поведение (65.2, дословно)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PLAIN</td><td>«Предотвращает и сжатие, и вынос из строки. Это единственно возможная стратегия для столбцов не-TOAST-able типов данных»</td></tr>
+        <tr><td>EXTENDED</td><td>«Разрешает и сжатие, и вынос из строки. Это значение по умолчанию для большинства TOAST-able типов данных. Сжатие будет предпринято первым, затем вынос из строки, если строка всё ещё слишком велика»</td></tr>
+        <tr><td>EXTERNAL</td><td>«Разрешает вынос из строки, но не сжатие. Использование EXTERNAL сделает операции подстроки на широких столбцах text и bytea более быстрыми (ценой увеличенного пространства хранения), потому что эти операции оптимизированы для извлечения только необходимых частей вынесенного значения, когда оно не сжато»</td></tr>
+        <tr><td>MAIN</td><td>«Разрешает сжатие, но не вынос из строки. (В действительности вынос из строки всё же будет выполнен для таких столбцов, но только как последнее средство, когда нет другого способа сделать строку достаточно маленькой для размещения на странице)»</td></tr>
+      </tbody>
+    </table>
+    <p>Стратегия по умолчанию задана типом, но «стратегия для
+    конкретного столбца таблицы может быть изменена командой
+    ALTER TABLE ... SET STORAGE» (65.2). Справочник уточняет
+    эффект: «Эта форма устанавливает режим хранения для столбца.
+    Она контролирует, хранится ли столбец в строке или во
+    вторичной TOAST-таблице, и должны ли данные сжиматься...
+    Обратите внимание, что ALTER TABLE ... SET STORAGE сама
+    по себе ничего не меняет в таблице; она только задаёт
+    стратегию, которая будет применяться при будущих обновлениях
+    таблицы»
+    (<a href="https://www.postgresql.org/docs/17/sql-altertable.html">/docs/17/sql-altertable.html</a>).
+    Текущее состояние видно в каталоге: столбец <code>attstorage</code>
+    — «обычно копия pg_type.typstorage типа этого столбца. Для
+    TOAST-able типов данных может быть изменён после создания
+    столбца для управления политикой хранения» (pg_attribute,
+    51.7), а значения букв описаны в pg_type (51.64): «p
+    (plain): значения всегда должны храниться просто...;
+    e (external): значения могут храниться во вторичном TOAST-отношении...;
+    m (main): значения могут сжиматься и храниться в строке;
+    x (extended): значения могут сжиматься и/или перемещаться
+    во вторичное отношение. x — обычный выбор для toast-able
+    типов».</p>
+
+    <h2>Демонстрация: строка уезжает в TOAST-таблицу</h2>
+    <p>Расширим читательский дневник полноценными обзорами
+    (ограничение <code>varchar(500)</code> из главы 4.2 мало для эссе —
+    <code>text</code> не ограничивает длину, глава 3.1):</p>
+
+    <pre><code class="language-sql">CREATE TABLE reviews_full (
+    review_id int PRIMARY KEY,
+    reader_id int REFERENCES readers,
+    book_id int REFERENCES books ON DELETE CASCADE,
+    body text
+);
+
+INSERT INTO reviews_full
+VALUES (101, 2, 1, repeat('замечательно ', 2000));
+
+SELECT attname, attstorage
+FROM pg_attribute
+WHERE attrelid = 'reviews_full'::regclass AND attnum > 0;
+
+SELECT reltoastrelid, reltoastrelid::regclass AS toast_table
+FROM pg_class
+WHERE relname = 'reviews_full';</code></pre>
+
+    <pre class="sample-output">CREATE TABLE
+INSERT 0 1
+ attname  | attstorage 
+----------+------------
+ review_id | p
+ reader_id | p
+ book_id  | p
+ body     | x
+(4 rows)
+
+ reltoastrelid | toast_table
+---------------+--------------
+         16387 | pg_toast.pg_toast_16384
+(1 row)</pre>
+
+    <p>Что выведено и почему: три целочисленных столбца имеют
+    стратегию <code>p</code> (PLAIN) — «единственно возможная стратегия
+    для столбцов не-TOAST-able типов данных»; у <code>body</code> типа
+    <code>text</code> — <code>x</code> (EXTENDED) — «обычный выбор для toast-able
+    типов» (pg_type, 51.64). У таблицы появилась TOAST-таблица
+    (OID в <code>reltoastrelid</code>), а её имя видно через приведение
+    <code>::regclass</code>: <code>pg_toast_16384</code>. Имя не выдумка — код
+    генерирует его по шаблону <code>pg_toast_%u</code> (подстановка OID
+    таблицы-владельца) в
+    <code>src/backend/catalog/toasting.c</code> (строка 199),
+    и там же комментарий: «TOAST-таблицы для обычных отношений
+    помещаются в pg_toast; для временных — в пер-backendное
+    пространство имён temp-toast-таблиц» (строки 234–235).
+    Числа у вас будут другими — это OID объектов
+    вашей базы; заметьте, что число в имени TOAST-таблицы — OID
+    самой <code>reviews_full</code> (16384), а <code>reltoastrelid</code> (16387) —
+    OID её TOAST-таблицы. Вставленный текст — 52 КБ (52 000 байт: «замечательно » —
+    13 символов по 2 байта в UTF-8, умноженные на 2000; в
+    двоичных единицах — около 51 КиБ) при
+    стратегии EXTENDED сначала был сжат: хорошо повторяющиеся
+    данные жмутся сильно, и строка могла остаться в главной
+    таблице. Проверим честно, без сжатия:</p>
+
+    <pre><code class="language-sql">ALTER TABLE reviews_full ALTER COLUMN body SET STORAGE EXTERNAL;
+
+INSERT INTO reviews_full
+VALUES (102, 3, 4, repeat('бессмертно ', 4000));
+
+SELECT attstorage FROM pg_attribute
+WHERE attrelid = 'reviews_full'::regclass AND attname = 'body';
+
+SELECT pg_size_pretty(pg_relation_size('reviews_full')) AS main_table,
+       pg_size_pretty(pg_relation_size('pg_toast.pg_toast_16384')) AS toast_table;</code></pre>
+
+    <pre class="sample-output">ALTER TABLE
+INSERT 0 1
+ attstorage
+------------
+ e
+(1 row)
+
+ main_table | toast_table 
+------------+------------
+ 8 kB       | 88 kB
+(1 row)</pre>
+
+    <p>Что выведено и почему: после SET STORAGE столбец получил
+    стратегию <code>e</code> (EXTERNAL) — «может храниться во вторичном
+    TOAST-отношении» (51.64); сами данные первой строки при
+    этом не тронуты — «SET STORAGE сама по себе ничего не
+    меняет в таблице» (sql-altertable). Новая строка с текстом
+    около 86 КиБ («бессмертно » — 22 байта: 11 символов по 2
+    в UTF-8, умноженные
+    на 4000) не сжималась и была вынесена: в главной таблице —
+    по-прежнему одна страница, в TOAST-таблице — десятки
+    килобайт чанков. Прикинем: 88 000 байт делятся на чанки
+    по ~2000 — примерно 44–45 кусков, «четыре куска на страницу»
+    (65.2.1) — 11–12 страниц, то есть 88–96 КБ (в нашем запуске
+    — 88 kB); ваше число
+    может отличаться на страницу-другую из-за накладных
+    расходов. С каждым новым большим значением toast_table
+    растёт, а main_table — нет. При чтении <code>SELECT body</code> всё
+    работает прозрачно: «это происходит прозрачно для
+    пользователя» (65.2) — сервер сам собирает значение из
+    чанков по индексу <code>(chunk_id, chunk_seq)</code>.</p>
+
+    <h2>Механизм в коде</h2>
+    <p>При каждой вставке/обновлении heap-строки вызывается
+    <code>heap_toast_insert_or_update</code> — файл
+    <code>src/backend/access/heap/heaptoast.c</code> на базовом
+    коммите (строка 96; шапка файла: «Try to make a given tuple
+    fit into one page by compressing or moving off attributes» —
+    «попытаться уместить данный кортеж в одну страницу, сжимая
+    или вынося атрибуты»). Порядок раундов зафиксирован в
+    комментарии на строках 162–167: «1: Сжимать в строке
+    атрибуты с attstorage EXTENDED и немедленно выносить очень
+    большие атрибуты с attstorage EXTENDED или EXTERNAL; 2:
+    Выносить атрибуты с attstorage EXTENDED или EXTERNAL; 3:
+    Сжимать в строке атрибуты с attstorage MAIN; 4: Выносить
+    атрибуты с attstorage MAIN». Ключевой критерий цикла —
+    суммарный размер данных строки против <code>maxDataLen</code> =
+    <code>RelationGetToastTupleTarget(rel, TOAST_TUPLE_TARGET) -
+    hoff</code> (строка 177). Само вынесение делает
+    <code>toast_tuple_externalize</code>, а запись чанков — <code>toast_save_datum</code>
+    в <code>src/backend/access/common/toast_internals.c</code>
+    (строка 119): цикл «Разбить элемент на куски» (строка 304)
+    нарезает данные порциями <code>Min(TOAST_MAX_CHUNK_SIZE,
+    data_todo)</code> (строка 313) и каждую вставляет в TOAST-таблицу
+    через <code>heap_insert</code> (строка 323) с записью в уникальный
+    индекс. Удаление строки освобождает чанки: <code>heap_toast_delete</code>
+    (heaptoast.c, строка 43) → <code>toast_delete_datum</code>
+    (toast_internals.c, строка 385).</p>
+    <p>Приятное следствие для конкурентных обновлений (глава
+    6.4): «во время операции UPDATE значения неизменённых полей
+    обычно сохраняются как есть; поэтому UPDATE строки с
+    вынесенными значениями не несёт затрат TOAST, если ни одно
+    из вынесенных значений не меняется» (65.2) — новые чанки не
+    пишутся, а новая версия строки разделяет старые.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Вынос больших значений в отдельное переполненное
+    хранилище — классическая тема организации хранения: курс
+    CMU 15-445 (Spring 2025) разбирает модели хранения и
+    сжатие в лекции #06 Storage Models &amp; Compression,
+    включая overflow-страницы для больших значений; Silberschatz
+    (7-е изд., § 13.1) описывает разбивку записей, не
+    помещающихся в блок, на «сборки из блоков» (наподобие
+    словарей блоков). PostgreSQL добавляет два штриха к
+    учебниковой схеме: сжатие перед выносом (по стратегии
+    столбца) и полная прозрачность для SQL — «large field values
+    are compressed and/or broken up... transparently to the
+    user» (65.2). Книга «PostgreSQL изнутри» (Ч. I) описывает
+    TOAST в том же ключе; детали этой главы сверены с
+    документацией 65.2 и кодом на базовом коммите.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему INSERT строки с полем <code>body</code>
+      размером 52 КБ (52 000 байт) не падает с ошибкой, хотя «кортежи не могут
+      пересекать несколько страниц»?</summary>
+      <p><b>Ответ.</b> Перед записью <code>heap_toast_insert_or_update</code>
+      (heaptoast.c, строка 96) приводит строку к размеру: «большие
+      значения полей сжимаются и/или разбиваются на несколько
+      физических строк» (65.2). При EXTERNAL значение выносится
+      чанками в TOAST-таблицу (toast_save_datum, toast_internals.c,
+      строка 119), а в самой строке остаётся «указатель... 18
+      байт независимо от фактического размера представляемого
+      значения» (65.2.1) — строка помещается на страницу.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. В таблице <code>body text</code> со стратегией по
+      умолчанию. Что произойдёт при INSERT значения на 3 КБ и
+      почему — сжатие, вынос, оба или ничего?</summary>
+      <p><b>Ответ.</b> Стратегия text по умолчанию — EXTENDED
+      («это значение по умолчанию для большинства TOAST-able
+      типов», 65.2). Код TOAST «запускается только тогда, когда
+      значение строки... шире, чем TOAST_TUPLE_THRESHOLD байт
+      (обычно 2 КБ)» (65.2.1), а 3 КБ больше порога, значит
+      обрабатываться будет вся строка; для EXTENDED «сжатие
+      будет предпринято первым, затем вынос из строки, если
+      строка всё ещё слишком велика». Если после сжатия строка
+      станет меньше ~2 КБ, она останется в главной таблице
+      сжатой; иначе большой атрибут поедет в TOAST-таблицу.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Выполнили <code>ALTER TABLE reviews_full
+      ALTER COLUMN body SET STORAGE EXTERNAL</code>. Изменились ли
+      уже вставленные строки, и что изменится для новых
+      INSERT?</summary>
+      <p><b>Ответ.</b> Старые строки не тронуты: «ALTER TABLE...
+      SET STORAGE сама по себе ничего не меняет в таблице; она
+      только задаёт стратегию, которая будет применяться при
+      будущих обновлениях таблицы» (sql-altertable). Новые
+      значения перестанут сжиматься («EXTERNAL разрешает вынос
+      из строки, но не сжатие», 65.2) и будут вынесены чанками
+      в TOAST-таблицу; выгода — «операции подстроки... более
+      быстрые» на широких text (65.2), цена — увеличенное
+      пространство хранения.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="07-02-pages-tuples.html">← Предыдущая: 7.2. Страницы данных и кортежи</a>
+      <a class="next" href="08-01-btree.html">Следующий модуль: 8.1. B-tree: устройство и применение →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/storage-toast.html">TOAST (65.2, 65.2.1: стратегии, порог, чанки, указатель 18 байт)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-altertable.html">ALTER TABLE (SET STORAGE)</a>,
+        <a href="https://www.postgresql.org/docs/17/catalog-pg-attribute.html">pg_attribute (51.7: attstorage)</a>,
+        <a href="https://www.postgresql.org/docs/17/catalog-pg-type.html">pg_type (51.64: typstorage p/e/m/x)</a>,
+        <a href="https://www.postgresql.org/docs/17/catalog-pg-class.html">pg_class (51.11: reltoastrelid)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-admin.html">Database Object Management Functions (9.26: pg_relation_size, pg_size_pretty)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/heap/heaptoast.c">src/backend/access/heap/heaptoast.c</a>
+        (<code>heap_toast_insert_or_update</code> L96, раунды L162–167, <code>maxDataLen</code> L177; <code>heap_toast_delete</code> L43),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/access/heaptoast.h">src/include/access/heaptoast.h</a>
+        (<code>TOAST_TUPLES_PER_PAGE</code> L45, <code>TOAST_TUPLE_THRESHOLD</code> L48, <code>TOAST_MAX_CHUNK_SIZE</code> L84),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/common/toast_internals.c">src/backend/access/common/toast_internals.c</a>
+        (<code>toast_save_datum</code> L119, цикл нарезки чанков L304, <code>heap_insert</code> чанков L323, <code>toast_delete_datum</code> L385),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/toasting.c">src/backend/catalog/toasting.c</a>
+        (имя <code>pg_toast_%u</code> L199, пространство имён L234–235).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — § 13.1 (Database Storage Architecture: записи, не помещающиеся в блок).</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекция #06 Storage Models &amp; Compression (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+      <li>Рогов Е. В. и др. «PostgreSQL изнутри» — Ч. I. Структурная основа; утверждения сверены с документацией 17.11.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

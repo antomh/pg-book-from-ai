@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.3. boolean, uuid, enum — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-03-boolean-uuid-enum">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.3. boolean, uuid, enum</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.3. boolean, uuid, enum</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T14 · PostgreSQL 17.11</p>
+
+    <h2>«Статус» и «идентификатор»: три решения одной проектной задачи</h2>
+    <p>У каждой книги в нашем проекте появляется статус: черновик,
+    опубликована, в архиве. Первое, что пишет разработчик, —
+    <code>status text</code> и строковые константы в коде. Опечатка «publshed»
+    обнаружится в рантайме, JOIN по статусам не защитить. Вторая
+    задача: сущности нужно создавать на нескольких серверах
+    приложения, и обычная последовательность целых чисел здесь не
+    годится. PostgreSQL закрывает обе задачи специализированными
+    типами: <code>enum</code> для статусов и <code>uuid</code> для распределённых
+    идентификаторов; <code>boolean</code> — третий участник главы, потому что
+    его NULL-третья грань ломает фильтры «все неактивные».</p>
+
+    <h2>boolean: два состояния и NULL</h2>
+    <p>Раздел 8.6
+    (<a href="https://www.postgresql.org/docs/17/datatype-boolean.html">/docs/17/datatype-boolean.html</a>):
+    «boolean — стандартный SQL-тип. Тип boolean может иметь несколько
+    состояний: "истина", "ложь" и третье состояние, "неизвестно",
+    которое представлено SQL-значением null» (перевод дословный).
+    Хранение — 1 байт (таблица 8.19). Логика работы с NULL уже
+    разобрана в главе 2.1 — трёхзначная логика операторов AND/OR/NOT
+    живёт именно здесь. Практическая ловушка повторяется на каждой
+    системе флагов — проверим её на синтетических данных (три
+    пользователя: активный, неактивный и с NULL):</p>
+
+    <pre><code class="language-sql">SELECT count(*) FILTER (WHERE NOT is_active) AS inactive
+FROM (VALUES (true), (false), (NULL::boolean)) AS users(is_active);</code></pre>
+
+    <pre class="sample-output"> inactive
+----------
+        1
+(1 row)</pre>
+
+    <p>Что выведено и почему: из трёх строк посчитана одна — у
+    пользователя с NULL выражение <code>NOT is_active</code> даёт NULL, и
+    <code>FILTER</code> его не пропустил — «в агрегат передаются только строки,
+    для которых filter_clause истинен» (глава 2.4, раздел 4.2.7).
+    «Все неактивные» в трёхзначной логике — это
+    <code>WHERE is_active IS DISTINCT FROM true</code>, а не <code>WHERE NOT
+    is_active</code>.</p>
+    <p>Полезная мелочь из 8.6: ввод допускает несколько написаний —
+    «true, yes, on, 1» для истины и «false, no, off, 0» для лжи,
+    «принимаются и уникальные префиксы этих строк, например t или n;
+    ведущие и завершающие пробелы игнорируются, регистр не важен».
+    Вывод — только <code>t</code>/<code>f</code>.</p>
+
+    <h2>uuid: идентификатор, уникальный без координации</h2>
+    <p>«Тип uuid хранит универсальные уникальные идентификаторы (UUID),
+    определённые RFC 4122, ISO/IEC 9834-8:2005 и связанными
+    стандартами... Этот идентификатор — 128-битная величина,
+    сгенерированная алгоритмом, выбранным так, чтобы совпадение
+    идентификаторов, сгенерированных кем-либо ещё во вселенной по
+    тому же алгоритму, было крайне маловероятно. Поэтому для
+    распределённых систем эти идентификаторы дают лучшую гарантию
+    уникальности, чем генераторы последовательностей, которые
+    уникальны только в пределах одной базы данных» — раздел 8.12
+    (<a href="https://www.postgresql.org/docs/17/datatype-uuid.html">/docs/17/datatype-uuid.html</a>,
+    перевод дословный).</p>
+    <p>Генерация: «PostgreSQL включает одну функцию для генерации UUID:
+    <code>gen_random_uuid() → uuid</code>. Эта функция возвращает UUID версии 4
+    (случайный)» — раздел 9.14
+    (<a href="https://www.postgresql.org/docs/17/functions-uuid.html">/docs/17/functions-uuid.html</a>;
+    «uuid-ossp» упоминается там же как модуль с другими алгоритмами).
+    Формат записи — «32 шестнадцатеричные цифры в группах 8-4-4-4-12»;
+    вывод всегда в стандартной форме.</p>
+
+    <pre><code class="language-sql">CREATE TABLE devices (
+    device_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name      text NOT NULL
+);
+
+INSERT INTO devices (name) VALUES ('reader-alfa'), ('reader-beta');
+
+SELECT device_id, name FROM devices;</code></pre>
+
+    <pre class="sample-output">              device_id              |    name
+--------------------------------------+-------------
+ 3f8a1e64-9c2f-4b8d-a7f5-6d1b0f83a2c4 | reader-alfa
+ 9d47c2a1-5e83-47d6-b2c9-8f0a4e1d7b3 | reader-beta
+(2 rows)</pre>
+
+    <p>Что выведено и почему: <code>DEFAULT gen_random_uuid()</code> заполнил
+    ключ на сервере при вставке — конкретные значения случайны
+    (версия 4); колонка показана в стандартной форме 8-4-4-4-12.
+    Выбор суррогатного ключа теперь осознанный: <code>integer</code> с
+    identity/sequence — 4 байта и монотонность, но «уникальны только в
+    пределах одной базы»; <code>uuid</code> — 16 байт (128 бит) и генерация на
+    любой машине без координации (сравнение объёмов — таблица 8.2 и
+    8.12).</p>
+
+    <h2>enum: тип-перечисление</h2>
+    <p>«Перечисляемые (enum) типы — это типы данных, состоящие из
+    статического, упорядоченного набора значений. Они эквивалентны
+    enum-типам во многих языках программирования» — раздел 8.7
+    (<a href="https://www.postgresql.org/docs/17/datatype-enum.html">/docs/17/datatype-enum.html</a>).
+    Создаётся тип командой CREATE TYPE:</p>
+
+    <pre><code class="language-sql">CREATE TYPE book_status AS ENUM
+    ('draft', 'review', 'published', 'archived');
+
+ALTER TABLE books ADD COLUMN status book_status NOT NULL DEFAULT 'draft';
+
+UPDATE books SET status = 'published'
+WHERE book_id IN (1, 2, 3, 4);
+
+SELECT book_id, status FROM books WHERE status &gt; 'draft' ORDER BY book_id;</code></pre>
+
+    <pre class="sample-output"> book_id |  status
+---------+-----------
+       1 | published
+       2 | published
+       3 | published
+       4 | published
+(4 rows)</pre>
+
+    <p>Что выведено и почему: сравнение enum «работает» для всех
+    стандартных операторов, а порядок задан не алфавитом, а
+    объявлением: «порядок значений enum-типа — это порядок, в котором
+    значения были перечислены при создании типа» (8.7.2), поэтому
+    'published' и 'archived' больше 'draft'. Опечатка невозможна на
+    этапе ввода:</p>
+
+    <pre><code class="language-sql">UPDATE books SET status = 'publshed' WHERE book_id = 1;</code></pre>
+
+    <pre class="sample-output">ERROR:  invalid input value for enum book_status: "publshed"</pre>
+
+    <p>(пример ошибки — 8.7.3 Type Safety, где документация
+    демонстрирует <code>invalid input value for enum happiness: &quot;sad&quot;</code>).
+    Там же: «каждый перечисляемый тип отдельен и не может сравниваться
+    с другими перечисляемыми типами» — даже с совпадающим набором
+    меток.</p>
+
+    <h3>Что можно менять, что нельзя</h3>
+    <p>«Хотя enum-типы задуманы для статических наборов значений,
+    поддерживается добавление новых значений в существующий тип и
+    переименование значений (см. ALTER TYPE). Существующие значения
+    нельзя удалить из enum-типа, как и изменить порядок сортировки
+    таких значений, иначе как пересоздав тип» (8.7). Добавление —
+    командой <code>ALTER TYPE ... ADD VALUE</code>: «эта форма добавляет новое
+    значение в enum-тип. Место нового значения в порядке может быть
+    задано как BEFORE или AFTER одного из существующих; иначе новый
+    элемент добавляется в конец списка» — справочная страница
+    <a href="https://www.postgresql.org/docs/17/sql-altertype.html">ALTER TYPE</a>.</p>
+
+    <pre><code class="language-sql">ALTER TYPE book_status ADD VALUE 'withdrawn' AFTER 'archived';</code></pre>
+
+    <p>Две цены этого решения, обе — из примечаний к ALTER TYPE:
+    «если ALTER TYPE ... ADD VALUE выполняется внутри блока
+    транзакции, новое значение нельзя использовать до фиксации
+    транзакции» и «сравнения с добавленным enum-значением иногда
+    медленнее сравнений между исходными элементами типа» (Notes,
+    там же).</p>
+
+    <h3>Как это хранится</h3>
+    <p>Реализация описана в 8.7.4: «enum-значение занимает на диске
+    четыре байта. Длина текстовой метки значения ограничена
+    настройкой NAMEDATALEN, скомпилированной в PostgreSQL; в
+    стандартных сборках это не более 63 байт. Соответствие внутренних
+    enum-значений и текстовых меток хранится в системном каталоге
+    pg_enum» (перевод дословный) — тот самый каталог из главы 1.3:
+    список статусов вашего проекта — строки в таблице метаданных.</p>
+
+    <h2>enum или справочная таблица?</h2>
+    <p>Enum экономит место (4 байта) и защищает от опечаток на вводе,
+    но у него нет строк-записей: нельзя повесить атрибуты («русское
+    название статуса», «цвет в интерфейсе»), нельзя ссылаться
+    внешним ключом из другой таблицы на множество значений (FK,
+    по определению из главы 1.1/5.5.5, ссылается на первичный или
+    уникальный ключ <i>таблицы</i>, а значения enum живут в типе).
+    Практическое правило: фиксированный лексикон приложения
+    ('draft'/'published') — enum; набор значений, который редактируют
+    пользователи или у которого есть атрибуты — справочная таблица
+    (модуль 4).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>WHERE NOT is_active</code> теряет строки
+      с NULL и как правильно выбрать «всех неактивных»?</summary>
+      <p><b>Ответ.</b> <code>NOT NULL</code> в трёхзначной логике даёт NULL, а
+      WHERE пропускает строки только при TRUE (глава 2.1, 7.2.2).
+      Правильно: <code>WHERE is_active IS DISTINCT FROM true</code> — двухзначный
+      предикат (9.2). Сама трёхзначность boolean заявлена в 8.6:
+      «третье состояние "неизвестно", представленное SQL-значением
+      null».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему для генерации идентификаторов в
+      распределённой системе выбирают uuid, а не sequence? Чем
+      платят?</summary>
+      <p><b>Ответ.</b> UUID — 128-битное значение, сгенерированное
+      алгоритмом с «крайне малой» вероятностью коллизии, что даёт
+      «лучшую гарантию уникальности, чем генераторы
+      последовательностей, уникальные только в пределах одной базы»
+      (8.12). Плата: 16 байт вместо 4 у integer и отсутствие
+      монотонности у версии 4 (генерация — <code>gen_random_uuid()</code>,
+      9.14).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. В enum book_status нужно добавить значение
+      'withdrawn' и позже переименовать 'archived'. Что из этого
+      выйдет, а что не выйдет никогда?</summary>
+      <p><b>Ответ.</b> Добавить значение можно: <code>ALTER TYPE ...
+      ADD VALUE</code> (с BEFORE/AFTER для позиции в порядке; по умолчанию
+      — в конец) — 8.7 и справочник ALTER TYPE. Переименовать можно:
+      RENAME VALUE. Удалить значение или изменить порядок
+      существующих нельзя «иначе как пересоздав тип» (8.7). Плата:
+      новое значение недоступно до фиксации транзакции, а сравнения
+      с ним иногда медленнее (Notes к ALTER TYPE).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-02-datetime-types.html">← Предыдущая: 3.2. Дата и время</a>
+      <a class="next" href="03-04-arrays.html">Следующая: 3.4. Массивы →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/datatype-boolean.html">Boolean Type (8.6)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype-uuid.html">UUID Type (8.12)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-uuid.html">UUID Functions (9.14)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype-enum.html">Enumerated Types (8.7: Declaration, Ordering, Type Safety, Implementation Details)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createtype.html">CREATE TYPE</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-altertype.html">ALTER TYPE (ADD VALUE, Notes)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype-numeric.html">Numeric Types (8.1 — сравнение размеров ключей)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 4
+        (специальные типы).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

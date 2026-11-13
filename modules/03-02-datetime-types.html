@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.2. Дата и время — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-02-datetime-types">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.2. Дата и время</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.2. Дата и время</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T13 · PostgreSQL 17.11</p>
+
+    <h2>«Запишите встречу на 15:00» — в Москве, Лондоне или везде?</h2>
+    <p>Приложение пишет в базу «2026-11-15 15:00:00». Через полгода
+    выясняется, что часть событий записана в московском времени, часть —
+    в серверном, у заказчика из другой зоны отчёты съехали на часы.
+    Разбор таких аварий всегда упирается в один вопрос: <b>что хранит
+    значение времени — момент на оси времени или показание часов?</b>
+    PostgreSQL даёт на него точный ответ, и эта глава показывает, какие
+    типы под какую задачу.</p>
+
+    <h2>Набор типов</h2>
+    <p>«PostgreSQL поддерживает полный набор типов даты и времени SQL,
+    показанный в таблице 8.9. Даты считаются по григорианскому календарю,
+    даже в годах до его введения» (раздел 8.5,
+    <a href="https://www.postgresql.org/docs/17/datatype-datetime.html">/docs/17/datatype-datetime.html</a>;
+    перевод дословный). Выжимка из таблицы 8.9:</p>
+    <table>
+      <thead><tr><th>Тип</th><th>Хранение</th><th>Описание</th><th>Разрешение</th></tr></thead>
+      <tbody>
+        <tr><td>timestamp [(p)] [without time zone]</td><td>8 байт</td><td>дата и время, без пояса</td><td>1 микросекунда</td></tr>
+        <tr><td>timestamp [(p)] with time zone</td><td>8 байт</td><td>дата и время, «с поясом» (формулировка таблицы 8.9 документации; фактически хранится момент в UTC, а пояс — свойство показа, см. следующий раздел)</td><td>1 микросекунда</td></tr>
+        <tr><td>date</td><td>4 байта</td><td>дата, без времени</td><td>1 день</td></tr>
+        <tr><td>time [(p)]</td><td>8 байт</td><td>время дня, без даты</td><td>1 микросекунда</td></tr>
+        <tr><td>interval [fields] [(p)]</td><td>16 байт</td><td>временной интервал</td><td>1 микросекунда</td></tr>
+      </tbody>
+    </table>
+    <p>Три детали из примечаний 8.5:</p>
+    <ul>
+      <li>«Стандарт SQL требует, чтобы запись timestamp означала
+        timestamp <b>without</b> time zone, и PostgreSQL соблюдает это
+        поведение. timestamptz принимается как сокращение для timestamp
+        with time zone; это расширение PostgreSQL»;</li>
+      <li>«time, timestamp и interval принимают опциональную точность p —
+        число дробных цифр в поле секунд. По умолчанию явной границы
+        точности нет. Допустимый диапазон p — от 0 до 6»;</li>
+      <li>про <code>time with time zone</code>: «тип time with time zone определён
+        стандартом SQL, но его определение имеет свойства, приводящие к
+        сомнительной полезности. В большинстве случаев комбинация date,
+        time, timestamp without time zone и timestamp with time zone
+        закрывает все потребности приложения».</li>
+    </ul>
+
+    <h2>Ключевой механизм: timestamptz хранит момент, пояс — свойство показа</h2>
+    <p>Раздел 8.5.3 Time Zones формулирует точно (перевод дословный):
+    «PostgreSQL предполагает ваш местный часовой пояс для любого типа,
+    содержащего только дату или время. <b>Все значения даты-времени,
+    знающие пояс, хранятся внутренне в UTC (всемирное координированное
+    время). Они преобразуются к местному времени в зоне, заданной
+    параметром конфигурации TimeZone, перед показом клиенту</b>». Имена
+    зон — из данных IANA, полный список виден в представлении
+    <code>pg_timezone_names</code> (там же, см. раздел 52.32).</p>
+    <p>Проверяется напрямую (представим сессию с TimeZone =
+    Europe/Moscow):</p>
+
+    <pre><code class="language-sql">CREATE TABLE meetings (
+    meeting_id integer PRIMARY KEY,
+    title      text NOT NULL,
+    held_at    timestamptz NOT NULL
+);
+
+INSERT INTO meetings VALUES
+    (1, 'Планирование', '2026-11-20 15:00:00+03');
+
+SELECT meeting_id, held_at FROM meetings;</code></pre>
+
+    <pre class="sample-output"> meeting_id |       held_at
+------------+---------------------
+          1 | 2026-11-20 15:00:00+03
+(1 row)</pre>
+
+    <p>Что выведено и почему: во вводе пояс задан явно (<code>+03</code>);
+    внутри сервер хранит момент в UTC, а при выводе конвертирует в
+    зону сессии — Europe/Moscow даёт <code>+03</code>. Смените зону сессии —
+    показ изменится, хранимое значение нет:</p>
+
+    <pre><code class="language-sql">SET timezone = 'Europe/London';
+SELECT meeting_id, held_at FROM meetings;</code></pre>
+
+    <pre class="sample-output"> meeting_id |       held_at
+------------+---------------------
+          1 | 2026-11-20 12:00:00+00
+(1 row)</pre>
+
+    <p>Что выведено и почему: это тот же момент (15:00 по Москве =
+    12:00 UTC в ноябре — зимнее время), показанный в другой зоне:
+    «пояс — свойство показа, не значения». Именно поэтому
+    <code>timestamptz</code> — тип для меток событий: заказов, встреч, платежей.
+    А <code>timestamp without time zone</code> — для «показаний часов», не
+    привязанных к точке на оси времени: расписание «каждый день в
+    09:00» в зоне клиента.</p>
+
+    <details class="box">
+      <summary>Замечание: ввод без пояса</summary>
+      <p>Если во вводе timestamptz пояс не указан, PostgreSQL
+      интерпретирует его в зоне сессии и конвертирует в UTC —
+      «PostgreSQL предполагает ваш местный часовой пояс» (8.5.3).
+      Явное <code>+03</code> в примере выше снимает эту неоднозначность.
+      Практика: в значениях, приходящих из других систем, всегда
+      указывайте смещение.</p>
+    </details>
+
+    <h2>interval: длительность, а не момент</h2>
+    <p>Интервал — «временной интервал»; синтаксис ввода по 8.5.4:
+    «interval-значения записываются подробным синтаксисом
+    <code>[@] количество единица [количество единица ...]
+    [direction]</code>, где количество — число (возможно со знаком),
+    единица — microsecond, millisecond, second, minute, hour, day,
+    week, month, year и т.п., direction — ago или пусто». Интервал
+    складывается и вычитается с датами:</p>
+
+    <pre><code class="language-sql">SELECT held_at + interval '2 weeks' AS two_weeks_later
+FROM meetings
+WHERE meeting_id = 1;</code></pre>
+
+    <pre class="sample-output">   two_weeks_later
+---------------------
+ 2026-12-04 15:00:00+03
+(1 row)</pre>
+
+    <p>Что выведено и почему: interval '2 weeks' — длительность;
+    сложение сдвинуло момент на 14 дней. Даты «считаются по
+    григорианскому календарю» (8.5), поэтому 20 ноября + 14 дней =
+    4 декабря — без ошибок длины месяцев, которые пришлось бы
+    учитывать вручную.</p>
+
+    <h2>Функции текущего времени: транзакция, оператор, мгновение</h2>
+    <p>Раздел 9.9.5 Current Date/Time
+    (<a href="https://www.postgresql.org/docs/17/functions-datetime.html">/docs/17/functions-datetime.html</a>):
+    «эти функции стандарта SQL возвращают значения, основанные на
+    <b>времени начала текущей транзакции</b>: CURRENT_DATE, CURRENT_TIME,
+    CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP». Рядом — PostgreSQL-функции
+    с разной семантикой: «now() — традиционный PostgreSQL-эквивалент
+    transaction_timestamp()»; «transaction_timestamp() эквивалентен
+    CURRENT_TIMESTAMP, но имя отражает, что он возвращает»;
+    «statement_timestamp() возвращает время начала текущего оператора...
+    statement_timestamp() и transaction_timestamp() равны в первом
+    операторе транзакции, но могут различаться в последующих»;
+    «clock_timestamp() возвращает фактическое текущее время, и его
+    значение меняется даже внутри одного оператора SQL» (9.9.5,
+    перевод дословный).</p>
+
+    <pre><code class="language-sql">SELECT now() AS transaction_start,
+       clock_timestamp() AS right_now;</code></pre>
+
+    <p>Что будет выведено и почему: оба значения — timestamptz; <code>now()</code>
+    фиксирован на старте транзакции (в psql каждый оператор — своя
+    транзакция, поэтому вне явного BEGIN разница видна только в
+    микросекундах), а <code>clock_timestamp()</code> — «тикающие» часы. Для
+    журналов аудита берите <code>now()</code> — все записи одной транзакции
+    получат одинаковую метку; для измерения длительностей —
+    <code>clock_timestamp()</code>.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Приложение записало '2026-11-20 15:00:00+03'.
+      Что именно хранится в столбце timestamptz и что изменится при
+      SET timezone = 'Asia/Yekaterinburg'?</summary>
+      <p><b>Ответ.</b> Хранится момент времени в UTC (12:00 UTC);
+      «все знающие пояс значения даты-времени хранятся внутренне в
+      UTC» (8.5.3). Смена TimeZone меняет только показ: вывод станет
+      17:00+05. Само значение и все сравнения/индексы — про один и
+      тот же момент.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Расписание «звонок каждый день в 09:00»
+      хранится для пользователей из разных поясов. Какой тип выбрать и
+      почему не timestamptz?</summary>
+      <p><b>Ответ.</b> <code>time</code> или <code>timestamp without time zone</code> — это
+      показание часов без привязки к моменту; в 9:00 по Москве и 9:00
+      по Лондону — разные моменты, а расписание описывает локальное
+      время. timestamptz превратил бы каждое «09:00» в конкретный
+      момент, зависящий от того, чей пояс подставили при записи.
+      (Классификация «момент vs показание» — 8.5.3; про timetz —
+      «сомнительная полезность», 8.5.)</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем now() отличается от clock_timestamp() и
+      что взять для audit_log.created_at?</summary>
+      <p><b>Ответ.</b> now() (и CURRENT_TIMESTAMP) — время начала
+      транзакции, фиксировано; clock_timestamp() — фактическое текущее
+      время, «меняется даже внутри одного оператора» (9.9.5). Для
+      audit_log обычно now(): все строки, записанные одной транзакцией,
+      получают согласованную метку начала операции.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-01-numeric-text-types.html">← Предыдущая: 3.1. Числовые и строковые типы</a>
+      <a class="next" href="03-03-boolean-uuid-enum.html">Следующая: 3.3. boolean, uuid, enum →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/datatype-datetime.html">Date/Time Types (8.5: типы, Time Zones, Interval Input)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-datetime.html">Date/Time Functions and Operators (9.9, 9.9.5 Current Date/Time)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 4.3
+        (типы даты и времени).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

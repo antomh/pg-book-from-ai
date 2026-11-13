@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 6.2. Savepoints и обработка ошибок — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="06-02-savepoints-errors">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m06">Модуль 6. Транзакции и конкурентность</a> /
+    <span aria-current="page">Глава 6.2. Savepoints и обработка ошибок</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 6.2. Savepoints и обработка ошибок</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T28 · PostgreSQL 17.11</p>
+
+    <h2>Пакетная загрузка умерла на 37-м дубликате</h2>
+    <p>Загрузчик из главы 5.1 переехал в транзакцию: сто строк
+    каталога заливаются одним блоком <code>BEGIN ... COMMIT</code>, чтобы
+    база не мелькала промежуточными состояниями. На строке 37 —
+    книга, которая уже есть: ошибка уникальности, и вот беда —
+    «после ошибки внутри блока транзакция больше не принимает
+    команды» до отката всего блока. 36 вставленных книг
+    отправляются на свалку вместе с 37-й. Нужен откат «до
+    отметки», а не «до нуля». Учебник формулирует прямо: «ROLLBACK
+    TO — единственный способ вернуть контроль над блоком
+    транзакции, переведённым системой в состояние aborted из-за
+    ошибки, иначе как откатить его полностью и начать заново»
+    (<a href="https://www.postgresql.org/docs/17/tutorial-transactions.html">/docs/17/tutorial-transactions.html</a>,
+    3.4, перевод дословный).</p>
+
+    <h2>Что такое savepoint</h2>
+    <p>«SAVEPOINT устанавливает новый savepoint внутри текущей
+    транзакции. Savepoint — это специальная отметка внутри
+    транзакции, позволяющая откатить все команды, выполненные
+    после её установки, восстанавливая состояние транзакции на
+    момент savepoint» —
+    (<a href="https://www.postgresql.org/docs/17/sql-savepoint.html">/docs/17/sql-savepoint.html</a>,
+    Description, дословно). Дальше — практическая механика из
+    Notes того же справочника: «используйте ROLLBACK TO для
+    отката к savepoint. Используйте RELEASE SAVEPOINT для
+    уничтожения savepoint, сохраняя эффекты команд, выполненных
+    после его установки». Внутри одной транзакции таких отметок
+    может быть много: «внутри транзакции может быть определено
+    несколько savepoint». Пример загрузчика с «плохой» строкой:</p>
+
+    <pre><code class="language-sql">BEGIN;
+
+INSERT INTO books (book_id, title, author_id)
+VALUES (13, 'Пиковая дама', 1);
+
+SAVEPOINT sp;
+
+INSERT INTO books (book_id, title, author_id)
+VALUES (1, 'Дублет Онегина', 1);          -- book_id 1 уже есть
+
+ROLLBACK TO SAVEPOINT sp;
+
+INSERT INTO books (book_id, title, author_id)
+VALUES (14, 'Полтава', 1);
+
+COMMIT;</code></pre>
+
+    <pre class="sample-output">BEGIN
+INSERT 0 1
+SAVEPOINT
+ERROR:  duplicate key value violates unique constraint "books_pkey"
+DETAIL:  Key (book_id)=(1) already exists.
+ROLLBACK
+INSERT 0 1
+COMMIT</pre>
+
+    <p>Что выведено и почему: первая вставка прошла (книга 13);
+    строка с <code>book_id</code> 1 нарушает первичный ключ — «duplicate key
+    value violates unique constraint» — и переводит транзакцию в
+    состояние aborted: дальнейшие команды блокировались бы до
+    отката. <code>ROLLBACK TO SAVEPOINT sp</code> возвращает транзакцию к
+    моменту отметки: «все изменения базы данных между
+    определением savepoint и откатом к нему отбрасываются, а
+    изменения, сделанные раньше savepoint, сохраняются» (3.4);
+    вставка 13-й книги уцелела, а 37-я «плохая» строка и всё
+    после неё отброшены. После COMMIT в таблице книги 13 и 14.
+    Вывод тега после ROLLBACK TO — просто <code>ROLLBACK</code>.</p>
+
+    <h2>Откуда берётся текст ошибки</h2>
+    <p>Сообщение об ошибке уникальности при вставке через
+    B-tree-индекс формирует проверка уникальности при вставке в
+    индекс: функция <code>_bt_check_unique</code> в файле
+    <code>src/backend/access/nbtree/nbtinsert.c</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>: вызов
+    <code>ereport(ERROR, ...)</code> со строкой
+    <code>errmsg(&quot;duplicate key value violates unique constraint \&quot;%s\&quot;&quot;)</code>
+    — строка 668, и детализацией
+    <code>errdetail(&quot;Key %s already exists.&quot;)</code> — строка 670. Арбитром
+    здесь выступает индекс первичного ключа <code>books_pkey</code> (глава
+    5.1).</p>
+
+    <h2>Правила хорошего тона со savepoints</h2>
+    <ul>
+      <li>Иерархия: «освобождение (release) или откат (rollback)
+        к savepoint автоматически освобождает все savepoints,
+        определённые после него» (3.4) — отметки образуют стек,
+        откатнуться можно только назад.</li>
+      <li>Одинаковые имена: «если savepoints с таким же именем уже
+        существуют, они будут недоступны, пока более новые
+        одноимённые savepoints не будут освобождены» (Notes,
+        sql-savepoint) — новый savepoint с тем же именем
+        затеняет старый.</li>
+      <li>Повторный откат: «после отката к savepoint он остаётся
+        определённым, так что можно откатываться к нему несколько
+        раз» (3.4) — цикл загрузки может ставить один и тот же
+        savepoint перед каждой строкой и откатываться к нему на
+        каждой ошибке.</li>
+      <li>Освобождение: «если вы уверены, что не будете больше
+        откатываться к конкретному savepoint, он может быть
+        освобождён, чтобы система могла освободить некоторые
+        ресурсы» (3.4).</li>
+    </ul>
+
+    <h2>Когда savepoint не нужен</h2>
+    <p>Честности ради: для задачи «пропустить дубликаты при
+    загрузке» существует специализированное решение — <code>ON CONFLICT
+    DO NOTHING</code> из главы 5.1, без savepoints и без ошибок вообще.
+    Savepoint — инструмент более общий: частичный откат по
+    произвольной логике, когда «переносить нельзя, но и валить
+    всё нельзя»: загрузка, где неудачная строка требует
+    компенсирующего действия (записать в лог, заменить,
+    попросить данные заново). Выбор — за сценарием, а не за
+    модой.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Транзакция после ошибки находится в
+      состоянии aborted. Какие два способа вернуть её в рабочее
+      состояние и в чём разница?</summary>
+      <p><b>Ответ.</b> <code>ROLLBACK</code> — полностью завершить транзакцию,
+      отбросив все изменения; <code>ROLLBACK TO SAVEPOINT имя</code> — «единственный
+      способ вернуть контроль над блоком транзакции, переведённым
+      системой в состояние aborted из-за ошибки, иначе как откатить
+      его полностью» (3.4): транзакция продолжается с отметки, а
+      «изменения, сделанные раньше savepoint, сохраняются» (там
+      же).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. В транзакции стоят savepoints s1, s2, s3.
+      Что произойдёт с s2 и s3 после <code>ROLLBACK TO SAVEPOINT s2</code>, и
+      можно ли после этого откатиться к s3?</summary>
+      <p><b>Ответ.</b> Откатятся команды после s2; s3 «освобождён»
+      автоматически: «откат или освобождение savepoint
+      автоматически освобождает все savepoints, определённые
+      после него» (3.4; Notes sql-savepoint). Откатиться к s3 уже
+      нельзя — отметки образуют стек. А вот s2 «остаётся
+      определённым, так что можно откатываться к нему несколько
+      раз» (3.4).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему для «пропустить дубликат при
+      пакетной вставке» ON CONFLICT DO NOTHING лучше savepoint, и
+      когда savepoint всё-таки незаменим?</summary>
+      <p><b>Ответ.</b> <code>ON CONFLICT DO NOTHING</code> решает задачу
+      штатно, без перевода транзакции в aborted и без
+      исключительного пути вообще (глава 5.1). Savepoint нужен,
+      когда реакция на ошибку сложнее пропуска: компенсация,
+      журналирование, замена данных — произвольная логика частичного
+      отката внутри общей транзакции.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="06-01-transactions-acid.html">← Предыдущая: 6.1. Транзакции и ACID</a>
+      <a class="next" href="06-03-isolation-levels.html">Следующая: 6.3. Уровни изоляции и аномалии →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-savepoint.html">SAVEPOINT (Description, Notes, Compatibility)</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-transactions.html">Transactions (3.4)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/nbtree/nbtinsert.c">src/backend/access/nbtree/nbtinsert.c</a>
+        (функция <code>_bt_check_unique</code> — L408; сообщение
+        <code>duplicate key value violates unique constraint</code> — L668).</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 9.1
+        (транзакции: общая информация).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

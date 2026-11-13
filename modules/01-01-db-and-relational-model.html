@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 1.1. Что такое базы данных и реляционная модель — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="01-01-db-and-relational-model">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m01">Модуль 1. Основы и реляционная модель</a> /
+    <span aria-current="page">Глава 1.1. Что такое базы данных и реляционная модель</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 1.1. Что такое базы данных и реляционная модель</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T01 · PostgreSQL 17.11</p>
+
+    <h2>Зачем перекладывать данные из файлов в СУБД</h2>
+    <p>Допустим, вы пишете приложение «читательский дневник»: список книг, авторов,
+    оценки. Первое естественное решение — хранить данные в файлах, например в JSON
+    или CSV. Пока пользователей двое и все записи добавляет ваш код, это работает.
+    Проблемы начинаются, когда данные становятся общими и меняются часто:</p>
+    <ul>
+      <li><b>Противоречия.</b> Ничто не мешает записать две книги с одинаковым
+        идентификатором или сослаться на автора, которого не существует. Каждый
+        клиентский код обязан сам проверять правила — и рано или поздно забывает.</li>
+      <li><b>Конкурентный доступ.</b> Два одновременно работающих клиента читают и
+        меняют один файл. Кто-то обязательно потеряет чужие изменения.</li>
+      <li><b>Поиск и структура.</b> Чтобы найти «все книги 2023 года с оценкой выше 4»,
+        придётся загрузить и разобрать всё целиком; произвольные запросы — это
+        постоянный ручной код.</li>
+    </ul>
+    <p>Именно эти три класса проблем — целостность, конкурентность, произвольные
+    запросы — и закрывают системы управления базами данных (СУБД): программа берёт
+    на себя <i>хранение данных и правила над ними</i>, а приложения работают с
+    данными через единый интерфейс — язык запросов. Почему такой интерфейс оказался
+    языком таблиц, чем реляционная модель оказалась удобнее файловой
+    кладки — целостность и декларативные запросы вместо процедурного
+    кода, — и какой словарь за ней стоит, — предмет этой главы. Подробное обсуждение
+    мотивации СУБД см. в Silberschatz, <i>Database System Concepts</i>, 7-е изд.,
+    глава 1 «Introduction» (раздел «Purpose of Database Systems»); по-русски —
+    Моргунов, <i>PostgreSQL. Основы языка SQL</i>, глава 1.</p>
+
+    <h2>Модель: данные — это таблицы</h2>
+    <p>PostgreSQL — <b>реляционная</b> СУБД: данные организованы по
+    реляционной модели, предложенной Э. Ф. Коддом (исторический очерк —
+    Silberschatz, <i>Database System Concepts</i>, 7-е изд., глава 1, раздел
+    «History of Database Systems»). Минимальный словарь модели (Silberschatz,
+    7-е изд., глава 2 «Introduction to the Relational Model»):</p>
+    <table>
+      <thead>
+        <tr><th>Термин модели</th><th>Что это</th><th>Имя в SQL/PostgreSQL</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>отношение</td><td>множество кортежей одинаковой формы</td><td>таблица</td></tr>
+        <tr><td>кортеж</td><td>упорядоченный набор значений по атрибутам</td><td>строка</td></tr>
+        <tr><td>атрибут</td><td>именованная роль в кортеже</td><td>столбец</td></tr>
+        <tr><td>домен</td><td>множество допустимых значений атрибута</td><td>тип данных</td></tr>
+        <tr><td>схема отношения</td><td>имена и домены атрибутов</td><td>определение таблицы</td></tr>
+      </tbody>
+    </table>
+    <p>В PostgreSQL каждая таблица описана набором столбцов с типами; полный список
+    встроенных типов — в документации «Data Types»:
+    <a href="https://www.postgresql.org/docs/17/datatype.html">/docs/17/datatype.html</a>.
+    Проектирование «какие таблицы и какие столбцы» — это перевод предметной области
+    на язык отношений; для «читательского дневника» естественны две таблицы:</p>
+
+    <pre><code class="language-sql">CREATE TABLE authors (
+    author_id  integer  PRIMARY KEY,
+    name       text     NOT NULL
+);
+
+CREATE TABLE books (
+    book_id    integer  PRIMARY KEY,
+    title      text     NOT NULL,
+    author_id  integer  REFERENCES authors (author_id)
+);</code></pre>
+
+    <p>Что здесь произошло: мы объявили не только данные, но и <b>правила</b> над ними.
+    Разберём каждое.</p>
+
+    <h3>Ключи: как модель обеспечивает уникальность и связи</h3>
+    <p><b>Первичный ключ</b> (PRIMARY KEY) — столбец или набор столбцов,
+    однозначно идентифицирующий строку; именно на него ссылаются
+    внешние ключи других строк и таблиц. Документация формулирует так: «первичный ключ обозначает столбец или
+    группу столбцов, которые могут использоваться как уникальный идентификатор строк
+    таблицы», и для этого значения должны быть уникальны и не равны NULL — раздел
+    «Primary Keys» (5.5.4):
+    <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">/docs/17/ddl-constraints.html</a>.
+    Похожее ограничение <b>UNIQUE</b> (5.5.3 там же) требует уникальности, но
+    допускает NULL; <b>NOT NULL</b> (5.5.2) просто запрещает отсутствующее значение.</p>
+    <p><b>Внешний ключ</b> (FOREIGN KEY, 5.5.5 там же) — это ссылка строки одной
+    таблицы на строку другой. Для <code>books.author_id</code> правило звучит так: значение
+    этого столбца обязано существовать среди <code>authors.author_id</code>. Попытка вставить
+    книгу с несуществующим автором будет <b>отклонена сервером</b> — а не вашим
+    кодом. Это и есть главный выигрыш СУБД: правила хранятся вместе с данными и
+    действуют для любого клиента.</p>
+
+    <details class="box">
+      <summary>Пояснение: что именно проверяет внешний ключ</summary>
+      <p>Внешний ключ проверяет <i>ссылочную целостность</i>: каждой книге —
+      существующий автор. Он не проверяет «осмысленность» ссылки (что автор
+      действительно написал эту книгу) и, в частности, не создаёт индекс на
+      ссылающемся столбце — подробности и последствия для производительности
+      обсуждаются в главе 4.2. Формальное определение ссылочной целостности —
+      Silberschatz, 7-е изд., глава 4 «Intermediate SQL», раздел «Integrity
+      Constraints».</p>
+    </details>
+
+    <h2>Тонкость: SQL-таблица — не совсем «множество»</h2>
+    <p>В строгой реляционной модели отношение — это <b>множество</b> кортежей:
+    дубликатов нет. SQL (и PostgreSQL) ведёт себя иначе: таблица может содержать
+    одинаковые строки, если никакие ограничения этого не запрещают, и результат
+    запроса без специальных указаний — <b>мультимножество</b> (bag). Это поведение
+    SQL описано в Silberschatz, 7-е изд., глава 3 «Introduction to SQL» (раздел о
+    структуре запросов). Например, если в таблице <code>books</code> три книги одного автора:</p>
+
+    <pre><code class="language-sql">SELECT author_id FROM books;</code></pre>
+
+    <p>вернёт три строки — по одной на каждую книгу, включая повторы идентификатора.
+    Убрать дубликаты и получить «множество» можно явно, ключевым словом DISTINCT —
+    это документированное поведение списка выборки (раздел 7.3.3 «DISTINCT»,
+    <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>):</p>
+
+    <pre><code class="language-sql">SELECT DISTINCT author_id FROM books;</code></pre>
+
+    <p>Что будет выведено и почему: первый запрос выводит значение <code>author_id</code> для
+    <i>каждой строки</i> таблицы — повторов не избегает никто, раз их в данных
+    три, их и будет три; второй сворачивает одинаковые значения в одну строку,
+    потому что DISTINCT сравнивает строки результата и отбрасывает точные
+    дубликаты. Сравнение здесь — по значению; забегая вперёд: сравнение с NULL
+    (в том числе <code>NULL = NULL</code>) возвращает не TRUE/FALSE, а NULL — это
+    трёхзначная логика SQL, о ней подробно в главе 2.1; описание NULL-семантики
+    в документации — «Comparison Operators»:
+    <a href="https://www.postgresql.org/docs/17/functions-comparison.html">/docs/17/functions-comparison.html</a>.</p>
+
+    <h2>Что даёт модель разработчику</h2>
+    <p>Реляционная модель — это контракт: таблица с объявленными типами, ключами и
+    связями описывает <i>инварианты</i> данных, которые сервер охраняет при любом
+    способе записи. Разработчику это значит: проверка «существует ли автор»,
+    «уникален ли идентификатор» не размазывается по коду приложений, а исполняется
+    в одном месте. Плата за это — данные надо проектировать: думать о ключах и
+    связях заранее. Этим мы займёмся всерьёз в модуле 4 (нормализация); сейчас
+    достаточно держать в голове таблицу терминов выше.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В таблице без ограничений дважды вставили полностью
+      одинаковую строку. Нарушило ли это реляционную модель? Нарушило ли это
+      PostgreSQL?</summary>
+      <p><b>Ответ.</b> Реляционную модель — да: отношение — множество кортежей,
+      дубликат в нём невозможен (Silberschatz, 7-е изд., гл. 2). PostgreSQL — нет:
+      SQL-таблица без ключей/уникальности допускает одинаковые строки, результат
+      выборки ведёт себя как мультимножество; чтобы получить «множество», в запросе
+      указывают DISTINCT
+      (<a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>,
+      раздел DISTINCT).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что произойдёт при попытке вставить строку в <code>books</code>
+      со значением <code>author_id</code>, которого нет в <code>authors</code>?</summary>
+      <p><b>Ответ.</b> Сервер отклонит операцию ошибкой: внешний ключ
+      <code>books.author_id REFERENCES authors (author_id)</code> требует, чтобы ссылаемое
+      значение существовало (ссылочная целостность). Это поведение описано в
+      разделе «Foreign Keys» документации:
+      <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">/docs/17/ddl-constraints.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем PRIMARY KEY отличается от просто UNIQUE + NOT NULL
+      на практике и зачем первичный ключ нужен вообще?</summary>
+      <p><b>Ответ.</b> По ограничениям PK сводится к уникальности + NOT NULL
+      (раздел 5.5.4
+      <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">/docs/17/ddl-constraints.html</a>).
+      Смысл первичного ключа — объявить <i>канонический</i> способ адресации строки:
+      на него удобно ссылаться внешними ключами из других таблиц, и модель данных
+      фиксирует, что строка идентифицируется именно этим набором столбцов.
+      Формально — это выбранный «потенциальный ключ» (candidate key); теория —
+      Silberschatz, 7-е изд., гл. 2 (раздел о ключах).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="next" href="01-02-cluster-database-role-psql.html">Следующая глава: 1.2. Кластер, база данных, роль; psql →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">Constraints (5.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype.html">Data Types (гл. 8)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">Select Lists / DISTINCT (7.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-comparison.html">Comparison Operators (9.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createtable.html">CREATE TABLE</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        гл. 1 (назначение СУБД), гл. 2 (реляционная модель), гл. 3 (SQL,
+        семантика мультимножества), гл. 4 (ограничения целостности).
+        <a href="https://db-book.com/">db-book.com</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — гл. 1 «Введение в базы
+        данных и SQL».
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

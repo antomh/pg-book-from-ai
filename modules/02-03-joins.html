@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.3. Соединения JOIN — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-03-joins">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.3. Соединения JOIN</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.3. Соединения JOIN</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T06 · PostgreSQL 17.11</p>
+
+    <h2>«Выведи книгу вместе с именем автора»</h2>
+    <p>В таблице <code>books</code> хранится только <code>author_id</code>, а имя лежит в
+    <code>authors</code> — нормальная схема из главы 1.1: идентификаторы вместо
+    повторяющихся имён. Но теперь пользователю нужен список «книга —
+    автор», и тут выясняется, что SELECT из одной таблицы этого не умеет.
+    Соединение (JOIN) — операция, которая строит одну таблицу из двух,
+    попарно сопоставляя строки по условию. Вдобавок к механике нас ждут
+    три классических сюрприза: строк становится <i>больше</i>, чем в
+    исходных таблицах; «авторы без книг» бесследно пропадают; и условие
+    в ON ведёт себя не так, как в WHERE.</p>
+    <p>Чтобы сюрпризы были видны, добавим автора, у которого нет книг:</p>
+
+    <pre><code class="language-sql">INSERT INTO authors VALUES (4, 'Иван Крылов');</code></pre>
+
+    <h2>Теория: соединение — это произведение плюс отбор</h2>
+    <p>В реляционной алгебре соединение определяется через две базовые
+    операции: декартово произведение (все пары строк двух отношений) и
+    селекцию (отбор пар по условию) — θ-соединение; внешнее соединение —
+    расширение, дополняющее непарные строки NULL-значениями (Silberschatz,
+    <i>Database System Concepts</i>, 7-е изд., глава 2, раздел 2.6 «The
+    Relational Algebra» — операции произведения и соединений). Документация
+    PostgreSQL описывает ту же механику приземлённо — через то, сколько и
+    каких строк даёт каждый вид JOIN (раздел 7.2.1.1 «Joined Tables»,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).
+    Далее все определения — из этого раздела.</p>
+
+    <h2>INNER JOIN: только совпавшие пары</h2>
+    <p>«Для каждой строки R1 таблицы T1 соединённая таблица содержит
+    строку для каждой строки T2, удовлетворяющей условию соединения с
+    R1» — определение INNER JOIN из 7.2.1.1. Слова INNER и OUTER
+    необязательны, INNER — умолчание.</p>
+
+    <pre><code class="language-sql">SELECT b.title, a.name
+FROM books b
+JOIN authors a ON a.author_id = b.author_id
+ORDER BY b.book_id;</code></pre>
+
+    <pre class="sample-output">      title       |      name
+------------------+------------------
+ Евгений Онегин   | Александр Пушкин
+ Руслан и Людмила | Александр Пушкин
+ Мёртвые души     | Николай Гоголь
+ Война и мир      | Лев Толстой
+ Анна Каренина    | Лев Толстой
+(5 rows)</pre>
+
+    <p>Что выведено и почему: шесть книг минус «Детектив» без автора =
+    5 строк; у каждой строки книги ровно один автор, поэтому пары не
+    размножаются. Размножение видно при связи «один-ко-многим» с другой
+    стороны: соедините <code>authors</code> с <code>books</code> по <code>author_id</code> — и Пушкин
+    встретится дважды: строк столько, сколько совпадающих пар, а не
+    «сколько записей в левой таблице». Именно поэтому JOIN при 1:N
+    меняет количество строк — это не ошибка, а определение операции.</p>
+
+    <h2>LEFT JOIN: не потерять левую таблицу</h2>
+    <p>Определение из 7.2.1.1: «сначала выполняется внутреннее
+    соединение. Затем для каждой строки T1, не удовлетворяющей условию
+    соединения ни с одной строкой T2, добавляется соединённая строка с
+    NULL-значениями в столбцах T2. Таким образом, соединённая таблица
+    всегда имеет минимум одну строку для каждой строки T1». Возвращаем
+    книгу без автора:</p>
+
+    <pre><code class="language-sql">SELECT b.title, a.name
+FROM books b
+LEFT JOIN authors a ON a.author_id = b.author_id
+ORDER BY b.book_id;</code></pre>
+
+    <pre class="sample-output">      title       |      name
+------------------+------------------
+ Евгений Онегин   | Александр Пушкин
+ Руслан и Людмила | Александр Пушкин
+ Мёртвые души     | Николай Гоголь
+ Война и мир      | Лев Толстой
+ Анна Каренина    | Лев Толстой
+ Детектив XXI века|
+(6 rows)</pre>
+
+    <p>Что выведено и почему: 6 строк — все книги; у «Детектива» нет
+    пары в <code>authors</code>, и столбцы правой таблицы заполнены NULL. RIGHT
+    JOIN симметричен («обратное левому: у результата всегда есть строка
+    для каждой строки T2»), FULL JOIN сохраняет обе стороны: «строка
+    добавляется с NULL-значениями в столбцах T2 для непарных строк T1 и
+    с NULL в столбцах T1 для непарных строк T2» (определения — там же,
+    7.2.1.1). На наших данных — все пять пар, плюс «Крылов» без книг,
+    плюс «Детектив» без автора:</p>
+
+    <pre><code class="language-sql">SELECT a.name, b.title
+FROM authors a
+FULL JOIN books b ON b.author_id = a.author_id;</code></pre>
+
+    <pre class="sample-output">      name       |       title
+-----------------+--------------------
+ Александр Пушкин | Евгений Онегин
+ Александр Пушкин | Руслан и Людмила
+ Николай Гоголь  | Мёртвые души
+ Лев Толстой     | Война и мир
+ Лев Толстой     | Анна Каренина
+ Иван Крылов     |
+                 | Детектив XXI века
+(7 rows)</pre>
+
+    <p>Что выведено и почему: семь строк — пять совпавших пар, строка
+    «Крылова» с NULL в столбце книг и строка «Детектива» с NULL в
+    столбце авторов; NULL с обеих сторон одновременно — ровно тот
+    случай, который не ловят ни LEFT, ни RIGHT JOIN.</p>
+
+    <h3>Анти-соединение: «у кого НЕТ книг»</h3>
+    <p>LEFT JOIN + проверка NULL на ключе правой таблицы — стандартный
+    способ искать «непарные» строки:</p>
+
+    <pre><code class="language-sql">SELECT a.name
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.author_id
+WHERE b.book_id IS NULL;</code></pre>
+
+    <pre class="sample-output">    name
+--------------
+ Иван Крылов
+(1 row)</pre>
+
+    <p>Что выведено и почему: LEFT JOIN дал Крылову строку с NULL в
+    столбцах <code>books</code>; фильтр <code>b.book_id IS NULL</code> оставил только её.
+    Почему проверяем именно <code>book_id</code> (ключ), а не любой столбец: у
+    парной строки <code>book_id</code> NULL-ом быть не может — это PRIMARY KEY.</p>
+
+    <h2>ON против WHERE: порядок операций</h2>
+    <p>Приём выше работает из-за порядка операций, который документация
+    фиксирует дословно: «ограничение в предложении ON обрабатывается
+    до соединения, а ограничение в предложении WHERE — после соединения.
+    Для внутренних соединений это не имеет значения, но для внешних
+    имеет большое значение» (7.2.1.1,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).
+    Следствие: фильтр по правой таблице в WHERE «убивает» NULL-строки
+    LEFT JOIN и превращает его фактически в INNER. Сравните:</p>
+
+    <pre><code class="language-sql">-- фильтр в ON: строки левой таблицы сохраняются (итог — 6 строк):
+SELECT b.title, a.name
+FROM books b
+LEFT JOIN authors a ON a.author_id = b.author_id
+   AND a.name = 'Лев Толстой';
+
+-- тот же фильтр в WHERE: NULL-строки отбрасываются (итог — 2 строки):
+SELECT b.title, a.name
+FROM books b LEFT JOIN authors a ON a.author_id = b.author_id
+WHERE a.name = 'Лев Толстой';</code></pre>
+
+    <p>Что будет выведено и почему: первый запрос — все 6 книг: у
+    книг Толстого будет имя автора, у остальных NULL в столбце
+    <code>name</code> (пары не нашлись, но левая строка по правилу LEFT JOIN
+    сохранена с NULL-дополнением); второй — только 2 строки,
+    книги Толстого, потому что WHERE отбросил всё, где
+    <code>a.name</code> не равен «Лев Толстой», включая NULL-строку
+    «Детектива». Правило: <b>в ON — условие соединения, в WHERE —
+    фильтр результата</b>.</p>
+
+    <h2>CROSS JOIN и запятая</h2>
+    <p>«Для каждой возможной комбинации строк T1 и T2 (то есть декартова
+    произведения) соединённая таблица содержит строку из всех столбцов
+    T1, за которыми все столбцы T2. Если в таблицах N и M строк,
+    соединённая таблица будет иметь N * M строк» — определение CROSS
+    JOIN из 7.2.1.1. На наших данных <code>authors CROSS JOIN books</code> даст
+    4 × 6 = 24 строки. Там же зафиксированы эквивалентности:
+    <code>FROM T1 CROSS JOIN T2</code> равнозначно <code>FROM T1 INNER JOIN T2 ON TRUE</code>
+    и <code>FROM T1, T2</code>; но «при более чем двух таблицах эта эквивалентность
+    неточна, потому что JOIN связывает крепче запятой» — то есть
+    <code>FROM t1 CROSS JOIN t2, t3</code> и <code>FROM t1, t2 CROSS JOIN t3</code> читаются
+    по-разному. На практике CROSS JOIN нужен редко: безусловные пары
+    множатся быстро, и чаще всего это признак забытого ON.</p>
+
+    <h2>USING и NATURAL JOIN</h2>
+    <p>Если столбцы соединения называются одинаково, есть сокращение.
+    Документация: «USING — сокращение, рассчитанное на ситуацию, когда
+    обе стороны соединения используют одно имя для соединяемых
+    столбцов... Соединение T1 и T2 с USING (a, b) даёт условие ON T1.a =
+    T2.a AND T1.b = T2.b. Кроме того, вывод JOIN USING убирает
+    избыточные столбцы: нет нужды печатать оба совпавших столбца...»
+    (7.2.1.1). Для нашей пары таблиц:
+    <code>books b JOIN authors a USING (author_id)</code> даст один столбец
+    <code>author_id</code> в выводе вместо двух.</p>
+    <p>NATURAL — «сокращённая форма USING: она образует список USING из
+    всех имён столбцов, встречающихся в обеих входных таблицах» (там же).
+    Звучит удобно, но документация предупреждает: «USING достаточно
+    безопасна относительно изменений столбцов, потому что комбинируются
+    только перечисленные столбцы. NATURAL значительно более рискованна:
+    любое изменение схемы, из-за которого в одной из таблиц появится
+    новое совпадающее имя столбца, приведёт к тому, что соединение
+    включит и этот новый столбец» (примечание в 7.2.1.1). В учебном и
+    рабочем коде пишите явный ON или USING.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В authors 4 строки, в books 6. Сколько строк
+      вернёт <code>authors a JOIN books b ON b.author_id = a.author_id</code>?
+      А <code>authors a LEFT JOIN books b ON b.author_id = a.author_id</code>?</summary>
+      <p><b>Ответ.</b> INNER — 5: по одной паре на каждую книгу с
+      указанным автором (у книг по одному автору; книга с NULL-автором
+      пары не имеет — NULL не «равен» ничему). LEFT — 6: пять пар плюс
+      NULL-строка для Крылова («у результата всегда есть строка для
+      каждой строки T1» — определения INNER/LEFT из 7.2.1.1,
+      <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем для LEFT JOIN отличается условие правой
+      таблицы в ON от того же условия в WHERE?</summary>
+      <p><b>Ответ.</b> ON-условие участвует в подборе пар (обрабатывается
+      до соединения): строки левой таблицы без пары всё равно останутся,
+      с NULL-дополнением. WHERE-условие фильтрует готовый результат
+      (после соединения) и отбрасывает NULL-строки — LEFT фактически
+      ведёт себя как INNER. Формулировка «ограничение в ON
+      обрабатывается до соединения, а в WHERE — после» — 7.2.1.1, там же
+      пример с LEFT JOIN t2.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему NATURAL JOIN считают рискованным и что
+      использовать вместо него?</summary>
+      <p><b>Ответ.</b> NATURAL неявно строит список соединяемых столбцов
+      из <i>всех</i> одноимённых столбцов двух таблиц: добавление
+      нового одноимённого столбца в любую из таблиц молча меняет
+      условие соединения (примечание в 7.2.1.1). Безопасная замена —
+      явный ON или USING с перечисленными столбцами.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-02-order-limit-distinct.html">← Предыдущая: 2.2. Сортировка, LIMIT/OFFSET, DISTINCT</a>
+      <a class="next" href="02-04-group-by-having.html">Следующая: 2.4. Агрегация: GROUP BY и HAVING →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Table Expressions / Joined Tables (7.2, 7.2.1.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-join.html">Tutorial: Joins Between Tables (2.6)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference)</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        глава 2, раздел 2.6 «The Relational Algebra» (декартово произведение,
+        θ-соединение, внешнее соединение); глава 4 «Intermediate SQL»,
+        раздел 4.1 «Join Expressions».
+        <a href="https://db-book.com/">db-book.com</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 9.5. Сортировка, агрегация и стоимость — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="09-05-sort-aggregation-cost">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m09">Модуль 9. Планировщик и EXPLAIN</a> /
+    <span aria-current="page">Глава 9.5. Сортировка, агрегация и стоимость</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 9.5. Сортировка, агрегация и стоимость</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T45 · PostgreSQL 17.11</p>
+
+    <h2>Почему два почти одинаковых GROUP BY дают разные планы</h2>
+    <p>Глава 2.4 научила писать GROUP BY; глава 9.3 — читать
+    планы. Но в планах двух похожих запросов с агрегацией
+    появились разные узлы: у одного <code>HashAggregate</code>, у другого
+    <code>GroupAggregate</code>. А над ними иногда возникает <code>Sort</code> с
+    загадочной строкой <code>Sort Method: quicksort Memory: 74kB</code>.
+    И наконец: в планах повсюду <code>cost=0.29..8.44</code> — что это за
+    единицы, в которых «дешевле» и «дороже»? Эта глава закрывает
+    все три вопроса — и завершает модуль о планировщике.</p>
+
+    <h2>Sort: сортировка в памяти и вне её</h2>
+    <p>Сортировки запроса исполняет модуль
+    <code>src/backend/utils/sort/tuplesort.c</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>. Его
+    шапка (перевод дословный): «этот модуль предоставляет
+    обобщённое средство сортировки кортежей... Модуль работает
+    эффективно как для малых, так и для больших объёмов данных.
+    Малые объёмы сортируются в памяти с помощью qsort(). Большие
+    объёмы сортируются с использованием временных файлов и
+    стандартного алгоритма внешней сортировки». Граница «малых
+    и больших» — память, отведённая операции: «объём памяти,
+    разрешённый для одной операции сортировки, задаётся в
+    килобайтах вызывающим кодом (большинство передаёт work_mem)»
+    (там же). <code>work_mem</code> — «задаёт базовый максимум памяти для
+    операции запроса (такой как сортировка или хеш-таблица) до
+    записи во временные дисковые файлы. Значение по умолчанию
+    — четыре мегабайта (4MB)» (19.4.1
+    <a href="https://www.postgresql.org/docs/17/runtime-config-resource.html">/docs/17/runtime-config-resource.html</a>,
+    перевод дословный). В EXPLAIN ANALYZE узел Sort отчитывается
+    о выбранном пути: «узлы Sort и Hash предоставляют дополнительную
+    информацию» (14.1.2
+    <a href="https://www.postgresql.org/docs/17/using-explain.html">/docs/17/using-explain.html</a>) —
+    строки вида <code>Sort Key: t1.fivethous</code>, <code>Sort Method:
+    quicksort  Memory: 74kB</code> из учебного примера 14.1.2. Напомним
+    из главы 8.2: сортировку может совсем убрать индекс —
+    «индекс может выдавать строки в определённом отсортированном
+    порядке. Это позволяет выполнить ORDER BY запроса без
+    отдельного шага сортировки» (11.4).</p>
+
+    <h2>Агрегация: два узла для GROUP BY</h2>
+    <p>Что делает агрегатная функция с каждой строкой, описывает
+    шапка <code>src/backend/executor/nodeAgg.c</code> (перевод
+    дословный): «ExecAgg обычно вычисляет каждый агрегат следующими
+    шагами: transvalue = initcond; для каждого входного_кортежа:
+    transvalue = transfunc(transvalue, входное_значение); result
+    = finalfunc(transvalue, ...)». То есть <code>avg(rating)</code> из 2.4 —
+    это накопление состояния по строкам, а не «магия одного
+    прохода». Для GROUP BY есть две стратегии исполнения, и их
+    имена в плане берутся из кода вывода: AGG_HASHED →
+    «HashAggregate», AGG_SORTED → «GroupAggregate»
+    (src/backend/commands/explain.c, строки 1548–1566: разбор
+    <code>aggstrategy</code>). Hash-стратегия: «хеширование можно смешивать
+    с сортированной группировкой... можно поддерживать AGG_HASHED
+    с несколькими хеш-таблицами и вовсе без сортировки» (nodeAgg.c,
+    дословно) — группы складываются в хеш-таблицу по ключу
+    GROUP BY. Sorted-стратегия работает по входу, уже упорядоченному
+    по ключу группы: «AGG_SORTED узлы представляют "rollup"...
+    первый отсортированный узел берёт вход из внешнего поддерева,
+    которое планировщик уже упорядочил» (nodeAgg.c). И особый
+    случай из 2.4: «если обычный вызов агрегата указывает
+    DISTINCT или ORDER BY, мы сортируем входные кортежи и
+    устраняем дубликаты (если требуется) перед выполнением
+    описанного процесса» (nodeAgg.c, дословно).</p>
+    <p>Демонстрация на отзывах; во втором запросе вход упорядочен
+    индексом <code>(book_id, rating)</code> из главы 8.2:</p>
+
+    <pre><code class="language-sql">EXPLAIN
+SELECT book_id, avg(rating) FROM reviews GROUP BY book_id;
+
+EXPLAIN
+SELECT book_id, avg(rating) FROM reviews
+GROUP BY book_id
+ORDER BY book_id;</code></pre>
+
+    <pre class="sample-output">                        QUERY PLAN
+--------------------------------------------------------------
+ HashAggregate  (cost=1.36..1.49 rows=5 width=12)
+   Group Key: book_id
+   ->  Seq Scan on reviews  (cost=0.00..1.12 rows=12 width=8)
+(3 rows)
+
+                            QUERY PLAN
+----------------------------------------------------------------
+ GroupAggregate  (cost=0.29..1.62 rows=5 width=12)
+   Group Key: book_id
+   ->  Index Only Scan using reviews_book_rating_idx on reviews
+         (cost=0.29..1.41 rows=12 width=8)
+(4 rows)</pre>
+
+    <p>Что выведено и почему (числа условны): без упорядоченного
+    входа планировщик выбрал <code>HashAggregate</code> — построить хеш-таблицу
+    групп по мере чтения; когда строки уже идут по возрастанию
+    <code>book_id</code> (Index Only Scan по индексу из главы 8.2 + глава
+    8.3), дешевле <code>GroupAggregate</code>: копить состояние, пока ключ
+    группы не сменится. Второй план заодно показывает знакомый
+    по 8.3 Index Only Scan. Какой план выбрать — снова решает
+    оценка стоимости.</p>
+
+    <h2>Из чего состоит cost</h2>
+    <p>Финальный вопрос модуля: единицы <code>cost</code>. Ответ из 19.7.2
+    Planner Cost Constants
+    (<a href="https://www.postgresql.org/docs/17/runtime-config-query.html">/docs/17/runtime-config-query.html</a>,
+    перевод дословный): «стоимости измеряются в условных единицах,
+    определяемых параметрами стоимости планировщика. Традиционная
+    практика — измерять стоимости в единицах чтений дисковых
+    страниц; то есть seq_page_cost условно равен 1.0, а остальные
+    параметры стоимости задаются относительно него». Сами
+    параметры (значения по умолчанию): <code>seq_page_cost</code> —
+    «оценка стоимости чтения дисковой страницы, являющегося
+    частью серии последовательных чтений. По умолчанию 1.0»;
+    <code>random_page_cost</code> — «оценка стоимости непоследовательно
+    читаемой дисковой страницы. По умолчанию 4.0... Уменьшение
+    этого значения относительно seq_page_cost приведёт к тому,
+    что система будет предпочитать индексные сканирования; его
+    увеличение сделает индексные сканирования относительно
+    более дорогими»; <code>cpu_tuple_cost</code> — «оценка стоимости
+    обработки каждой строки во время запроса. По умолчанию
+    0.01»; <code>cpu_index_tuple_cost</code> — «оценка стоимости обработки
+    каждой записи индекса при индексном сканировании. По
+    умолчанию 0.005»; <code>cpu_operator_cost</code> — «оценка стоимости
+    обработки каждого оператора или функции. По умолчанию
+    0.0025». Так <code>cost=1.36..1.49</code> для HashAggregate из примера
+    складывается приблизительно так: одна страница Seq Scan
+    (1.0) + 12 строк × cpu_tuple_cost + узлы агрегата (пять
+    групп по <code>book_id</code> — книги 1, 2, 3, 4 и 6 — та же
+    таблица из 12 отзывов, что и в главах 9.2–9.3, поэтому и
+    стоимости Seq Scan совпадают). Для
+    сравнения планов между собой единица не важна — важны
+    отношения. Настройка этих параметров — эксплуатационная
+    тема (middle+): «к сожалению, не существует чётко определённого
+    метода определения идеальных значений переменных стоимости»
+    (19.7.2). Быстрое вмешательство в выбор планов — параметры
+    <code>enable_*</code> из 19.7.1: «эти параметры предоставляют грубый
+    метод влияния на планы запросов, выбираемые оптимизатором
+    запросов... Лучшие способы улучшить качество планов включают
+    подгонку констант стоимости, ручной запуск ANALYZE, увеличение
+    default_statistics_target» (19.7.1, дословно).</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Внешняя сортировка — классика Silberschatz (7-е изд.,
+    гл. 15, § 15.4 Sorting): сортировка runs и их слияние, когда
+    данные не помещаются в память; tuplesort.c — прямая реализация
+    («малые объёмы... qsort(); большие... временные файлы и
+    стандартный алгоритм внешней сортировки»), причём README
+    модуля ссылается на Кнута. Агрегация — § 15.6 Other
+    Operations. Оценка стоимости операторов — § 15.2 Measures
+    of Query Cost: стоимость оператора складывается из I/O
+    (страницы) и CPU (кортежи/операторы) — ровно то, что вы
+    видели в параметрах seq_page_cost и cpu_*. Курс CMU 15-445
+    разбирает сортировку и агрегацию в лекции #11 (Sorting &amp;
+    Aggregations); русскоязычный разбор — книга «PostgreSQL 18.
+    Оптимизация запросов» (гл. «Сортировка и группировка»).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В EXPLAIN ANALYZE у узла Sort строка
+      «Sort Method: quicksort Memory: 74kB». Что изменится, если
+      данных станет в сто раз больше?</summary>
+      <p><b>Ответ.</b> Пока сортировка вписывается в <code>work_mem</code>
+      («по умолчанию четыре мегабайта», 19.4.1), работает
+      быстрый вариант: «малые объёмы сортируются в памяти с
+      помощью qsort()» (tuplesort.c). Когда память исчерпана,
+      включается внешний путь: «большие объёмы сортируются с
+      использованием временных файлов и стандартного алгоритма
+      внешней сортировки» (tuplesort.c) — Sort Method сменится
+      на внешний вариант, а во временном каталоге появятся
+      файлы сортировки.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем GroupAggregate отличается от
+      HashAggregate и почему у второго запроса из примера
+      планировщик выбрал GroupAggregate?</summary>
+      <p><b>Ответ.</b> HashAggregate строит хеш-таблицу групп
+      («AGG_HASHED... без сортировки вообще», nodeAgg.c) по
+      мере чтения; GroupAggregate требует вход, упорядоченный
+      по ключу группы («первый отсортированный узел берёт вход
+      из внешнего поддерева, которое планировщик уже упорядочил»,
+      nodeAgg.c). Во втором запросе строки уже шли по <code>book_id</code>
+      из Index Only Scan по индексу <code>(book_id, rating)</code> (глава
+      8.2: индекс «позволяет выполнить ORDER BY без отдельного
+      шага сортировки», 11.4) — сортировать не нужно, и
+      сгруппировать по мере следования дешевле хеш-таблицы.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Можно ли по значению cost сказать,
+      сколько миллисекунд займёт запрос? Из чего складывается
+      это число?</summary>
+      <p><b>Ответ.</b> Нет: «стоимости измеряются в условных
+      единицах... в единицах чтений дисковых страниц; seq_page_cost
+      условно равен 1.0» (19.7.2) — это безразмерные величины
+      для сравнения планов. Складываются из страниц I/O
+      (<code>seq_page_cost</code> 1.0, <code>random_page_cost</code> 4.0) и работы
+      процессора: строк (<code>cpu_tuple_cost</code> 0.01), записей индекса
+      (<code>cpu_index_tuple_cost</code> 0.005), операторов и функций
+      (<code>cpu_operator_cost</code> 0.0025) — все значения по умолчанию
+      из 19.7.2.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="09-04-scan-join-methods.html">← Предыдущая: 9.4. Методы доступа и соединения в планах</a>
+      <a class="next" href="10-01-sql-functions.html">Следующий модуль: 10.1. Функции на SQL →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/using-explain.html">Using EXPLAIN (14.1.2 — Sort Method, узлы Sort и Hash)</a>,
+        <a href="https://www.postgresql.org/docs/17/runtime-config-query.html">Query Planning (19.7.1 Planner Method Configuration; 19.7.2 Planner Cost Constants)</a>,
+        <a href="https://www.postgresql.org/docs/17/runtime-config-resource.html">Memory (19.4.1 — work_mem)</a>,
+        <a href="https://www.postgresql.org/docs/17/indexes-ordering.html">Indexes and ORDER BY (11.4)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/sort/tuplesort.c">src/backend/utils/sort/tuplesort.c</a>
+        (шапка: qsort() для малых объёмов, внешняя сортировка для больших, work_mem),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeAgg.c">src/backend/executor/nodeAgg.c</a>
+        (ExecAgg: initcond → transfunc → finalfunc; AGG_HASHED/AGG_SORTED; DISTINCT внутри агрегата),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/explain.c">src/backend/commands/explain.c</a>
+        (имена узлов «HashAggregate»/«GroupAggregate» L1548–1566).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 15 Query Processing (§ 15.2 Measures of Query Cost; § 15.4 Sorting; § 15.6 Other Operations).</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекция #11 Sorting &amp; Aggregations (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+      <li>«PostgreSQL 18. Оптимизация запросов» (Postgres Professional) — гл. «Сортировка и группировка». Структурная основа; утверждения сверены с документацией 17.11.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

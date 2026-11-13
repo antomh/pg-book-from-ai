@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 8.3. Index-only scan и карта видимости — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="08-03-index-only-scan">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m08">Модуль 8. Индексы</a> /
+    <span aria-current="page">Глава 8.3. Index-only scan и карта видимости</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 8.3. Index-only scan и карта видимости</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T39 · PostgreSQL 17.11</p>
+
+    <h2>«Индекс покрывает запрос» — а heap всё равно читается</h2>
+    <p>В главе 8.2 запрос <code>SELECT rating, created_at FROM
+    reviews WHERE book_id = 13</code> получил план «Index Only Scan» —
+    данные взяты из индекса, таблица не читалась. Разработчик
+    запускает тот же запрос после вечерней активности модуля 6
+    (вставки, обновления, откаты) — и в плане появляется
+    обращение к таблице. Индекс не изменился, запрос не
+    изменился. Почему «покрывающий» индекс иногда перестаёт
+    покрывать? Ответ спрятан в связке двух механизмов: MVCC
+    (глава 6.4) и карты видимости (глава 6.7).</p>
+
+    <h2>Два условия и третье, невидимое</h2>
+    <p>Идея метода из 11.9
+    (<a href="https://www.postgresql.org/docs/17/indexes-index-only-scans.html">/docs/17/indexes-index-only-scans.html</a>,
+    перевод дословный): «базовая идея — возвращать значения
+    прямо из каждого элемента индекса вместо обращения к
+    соответствующему элементу heap. Есть два фундаментальных
+    ограничения на то, когда этот метод может использоваться».
+    Первое: «тип индекса должен поддерживать index-only
+    сканирования. B-tree индексы всегда это делают. GiST и
+    SP-GiST поддерживают index-only сканирования для одних
+    классов операторов, но не для других. Прочие типы индексов
+    поддержки не имеют. Базовое требование: индекс должен
+    физически хранить или уметь восстанавливать исходное
+    значение данных для каждого элемента индекса. Как
+    контрпример, GIN индексы не могут поддерживать index-only
+    сканирования, потому что каждый элемент индекса обычно
+    содержит только часть исходного значения данных». Второе:
+    «запрос должен ссылаться только на столбцы, хранящиеся в
+    индексе» — включая INCLUDE-столбцы из главы 8.2. И третье,
+    самое интересное: «есть дополнительное требование для
+    любого сканирования таблицы в PostgreSQL: оно должно
+    проверять, что каждая извлечённая строка "видима" снимку
+    MVCC запроса... Информация о видимости не хранится в
+    элементах индекса, только в элементах heap. На первый взгляд
+    это сделало бы index-only сканирование бессмысленным, так
+    как проверка видимости требовала бы обращения к heap в
+    любом случае» (11.9). Вот разгадка нашей загадки: иногда
+    — требовала бы.</p>
+
+    <h2>Карта видимости: выход из тупика</h2>
+    <p>Продолжение 11.9 (дословно): «однако для редко меняющихся
+    данных есть обходной путь. PostgreSQL отслеживает для
+    каждой страницы heap таблицы, все ли строки, хранящиеся на
+    этой странице, достаточно стары, чтобы быть видимыми всем
+    текущим и будущим транзакциям. Эта информация хранится в
+    бите карты видимости таблицы. Index-only сканирование,
+    найдя подходящий элемент индекса, проверяет бит карты
+    видимости соответствующей heap-страницы. Если он установлен,
+    строка известна как видимая, и данные могут быть возвращены
+    без дальнейшей работы. Если он не установлен, должен быть
+    посещён элемент heap, чтобы выяснить, видима ли строка, —
+    так что никакого выигрыша перед обычным индексным
+    сканированием нет». Дешевизна проверки: «поскольку карта
+    видимости в четыре порядка меньше heap, который она
+    описывает, для доступа к ней нужно гораздо меньше физического
+    ввода-вывода. В большинстве ситуаций карта видимости всё
+    время остаётся в кеше». Кто ставит биты — вы знаете из
+    главы 6.7: VACUUM, «поддерживать карту видимости для каждой
+    таблицы, чтобы отслеживать, какие страницы содержат только
+    кортежи, о которых известно, что они видимы всем активным
+    транзакциям» (24.1.4). Поэтому вывод 11.9 (дословно):
+    «index-only сканирование будет выигрышным, только если
+    значительная доля heap-страниц таблицы имеет установленные
+    биты all-visible. Но таблицы, в которых большая часть строк
+    не меняется, достаточно распространены, чтобы сделать этот
+    тип сканирования очень полезным на практике».</p>
+    <p>В коде бит видимости — это не метафора. Карта видимости —
+    отдельный файл форка рядом с таблицей; на каждую heap-страницу
+    в ней отведено 2 бита: <code>BITS_PER_HEAPBLOCK 2</code>, флаги
+    <code>VISIBILITYMAP_ALL_VISIBLE 0x01</code> и <code>VISIBILITYMAP_ALL_FROZEN
+    0x02</code>
+    (src/include/access/visibilitymapdefs.h на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>,
+    строки 17–21; второй бит — про заморозку из главы 6.7).
+    Устанавливает биты функция <code>visibilitymap_set</code>
+    (src/backend/access/heap/visibilitymap.c, строка 274); при
+    обычной уборке её вызывает <code>lazy_scan_heap</code> — та самая
+    функция VACUUM из главы 6.7 (src/backend/access/heap/vacuumlazy.c,
+    вызов на строке 1553 внутри цикла по страницам). Проверяет
+    бит сам index-only-узел — ниже.</p>
+
+    <h2>Демонстрация: Heap Fetches до и после VACUUM</h2>
+    <p>Смотрим отзывы «Войны и мира» (книга 4 — два отзыва,
+    переживших обновление в 6.3; вставка отзыва 17 в 8.1 тоже
+    сделала страницу не полностью видимой). Оговорка о размере:
+    на таблице в одну страницу планировщик выбрал бы Seq Scan,
+    поэтому на время опыта выключаем его — приём из главы 8.2:</p>
+    <pre><code class="language-sql">SET enable_seqscan = off;
+
+EXPLAIN ANALYZE
+SELECT book_id, rating FROM reviews
+WHERE book_id = 4;
+
+VACUUM reviews;
+
+EXPLAIN ANALYZE
+SELECT book_id, rating FROM reviews
+WHERE book_id = 4;</code></pre>
+
+    <pre class="sample-output">Index Only Scan using reviews_book_rating_idx on reviews
+  (cost=0.29..8.31 rows=2 width=8) (actual time=0.020..0.021 rows=2 loops=1)
+  Index Cond: (book_id = 4)
+  Heap Fetches: 2
+Planning Time: 0.116 ms
+Execution Time: 0.033 ms
+VACUUM
+Index Only Scan using reviews_book_rating_idx on reviews
+  (cost=0.29..8.31 rows=2 width=8) (actual time=0.018..0.019 rows=2 loops=1)
+  Index Cond: (book_id = 4)
+  Heap Fetches: 0
+Planning Time: 0.110 ms
+Execution Time: 0.027 ms</pre>
+
+    <p>Что выведено и почему: <code>EXPLAIN ANALYZE</code> «заставляет
+    оператор действительно выполниться, а не только
+    спланироваться. Тогда к отображению добавляется фактическая
+    статистика времени выполнения»
+    (<a href="https://www.postgresql.org/docs/17/sql-explain.html">/docs/17/sql-explain.html</a>,
+    43.9.1, перевод дословный). Строка «Heap Fetches: 2» —
+    счётчик обращений к таблице: бит карты видимости на странице
+    с отзывами книги 4 не был установлен (страница пережила
+    обновление из 6.3 и вставку из 8.1, а после VACUUM в 6.7
+    её снова «испортила» вставка отзыва 17; бит ставит только
+    VACUUM). После <code>VACUUM</code> бит установлен — «данные могут быть
+    возвращены без дальнейшей работы» (11.9), и «Heap Fetches:
+    0»: таблица не прочитана ни разу. Обратите внимание на
+    время планирования в обоих случаях и на то, что стоимость
+    не изменилась: планировщик не знает заранее, сколько будет
+    heap-обращений, — он видит только данные каталога. Числа
+    actual time у вас будут другими; важны <code>Heap Fetches: N → 0</code>.</p>
+
+    <h2>Механизм в коде</h2>
+    <p>Узел плана «Index Only Scan» реализован в
+    <code>src/backend/executor/nodeIndexonlyscan.c</code>. Функция
+    выборки — <code>IndexOnlyNext</code> (строка 62). Ключевое решение — в
+    комментарии на строках 127–130: «мы можем пропустить
+    чтение heap, если TID ссылается на heap-страницу, на которой
+    все кортежи известны видимыми всем. В любом случае мы
+    используем индексный кортеж, а не heap-кортеж, как источник
+    данных» (перевод дословный). Проверка бита — макрос
+    <code>VM_ALL_VISIBLE</code> (строки 161–163); если бит не установлен:
+    «чёрт, придётся посетить heap, чтобы проверить видимость»
+    (комментарий на строке 166, далее <code>index_fetch_heap</code> на строке 169). Каждый
+    такой случай увеличивает счётчик <code>ntuples2</code> через
+    <code>InstrCountTuples2</code> — и именно он выводится в EXPLAIN как
+    «Heap Fetches» (src/backend/commands/explain.c, строка 1993).
+    Напомним связь с MVCC (глава 6.4): если в параллельной
+    незавершённой транзакции изменилась строка книги 13, то
+    бит сбросится, и ваш запрос честно проверит видимость
+    версии в heap — index-only scan никогда не вернёт строку,
+    невидимую снимку запроса. Данные — из индекса, истина о
+    видимости — из таблицы.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>«Покрывающий индекс» — классическое понятие теории
+    индексирования: индекс, содержащий все запрошенные атрибуты,
+    избавляет от обращения к данным. В документации PostgreSQL
+    термин covering введён в 11.9; в Silberschatz (7-е изд.,
+    гл. 14 Indexing) покрывающим индексам отдельного параграфа
+    в оглавлении главы нет (составным ключам посвящён § 14.6),
+    поэтому за теоретическим разбором отсылаем к курсу CMU. Специфика PostgreSQL, которой нет в классической
+    модели: информация о видимости при многоверсионности живёт
+    только в строках, а не в индексах, поэтому «чистое» чтение из
+    индекса потребовало отдельной структуры — карты видимости —
+    и её поддержки VACUUM. Это хороший пример того, как решение
+    из теории (покрывающий индекс) на практике связано с
+    устройством хранения (глава 7.2) и конкурентностью (глава
+    6.4). Курс CMU 15-445 обсуждает покрывающие индексы в
+    лекциях #08–09 (Tree Indexes).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему для index-only scan недостаточно,
+      чтобы индекс содержал все столбцы запроса? Что ещё проверяет
+      сервер?</summary>
+      <p><b>Ответ.</b> «Есть дополнительное требование для любого
+      сканирования таблицы в PostgreSQL: оно должно проверять,
+      что каждая извлечённая строка "видима" снимку MVCC
+      запроса... Информация о видимости не хранится в элементах
+      индекса, только в элементах heap» (11.9). Сервер проверяет
+      бит карты видимости страницы: «если он установлен, строка
+      известна как видимая, и данные могут быть возвращены без
+      дальнейшей работы. Если не установлен, должен быть
+      посещён элемент heap» (11.9).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. В EXPLAIN ANALYZE узла Index Only Scan
+      было «Heap Fetches: 40», после VACUUM стало 0. Что
+      изменилось и почему это ускоряет запрос?</summary>
+      <p><b>Ответ.</b> VACUUM «поддерживает карту видимости,
+      чтобы отслеживать, какие страницы содержат только кортежи,
+      о которых известно, что они видимы всем активным
+      транзакциям» (24.1.4). До уборки биты не были установлены,
+      и узел для каждого элемента индекса «посещал элемент heap,
+      чтобы выяснить, видима ли строка» (11.9) — 40 раз. После
+      уборки проверки проходят по карте: «карта видимости в
+      четыре порядка меньше heap... В большинстве ситуаций карта
+      видимости всё время остаётся в кеше» (11.9).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Таблицу постоянно обновляют и вставляют
+      новые строки. Стоит ли проектировать под неё покрывающий
+      индекс ради index-only scan?</summary>
+      <p><b>Ответ.</b> Как правило, нет: index-only сканирование
+      «будет выигрышным, только если значительная доля heap-страниц
+      таблицы имеет установленные биты all-visible» (11.9), а
+      при активных изменениях VACUUM не успевает/не может держать
+      биты установленными — почти каждый элемент потребует
+      «посетить элемент heap». Покрывающий индекс приносит пользу
+      таблицам, «в которых большая часть строк не меняется»
+      (11.9): справочникам, архивам, колонкам отчётности.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="08-02-composite-partial-expressions.html">← Предыдущая: 8.2. Составные, частичные индексы и индексы на выражениях</a>
+      <a class="next" href="08-04-other-index-methods.html">Следующая: 8.4. Другие методы: hash, GIN, GiST, SP-GiST, BRIN →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/indexes-index-only-scans.html">Index-Only Scans and Covering Indexes (11.9)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-explain.html">EXPLAIN (43.9.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/routine-vacuuming.html">Routine Vacuuming (24.1.4 — карта видимости; цитата по главе 6.7)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeIndexonlyscan.c">src/backend/executor/nodeIndexonlyscan.c</a>
+        (<code>IndexOnlyNext</code> L62, комментарий о пропуске heap L127–130, проверка <code>VM_ALL_VISIBLE</code> L161–163, «Rats, we have to visit the heap» L166, <code>index_fetch_heap</code> L169),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/access/visibilitymapdefs.h">src/include/access/visibilitymapdefs.h</a>
+        (<code>BITS_PER_HEAPBLOCK 2</code>, <code>VISIBILITYMAP_ALL_VISIBLE 0x01</code>, <code>VISIBILITYMAP_ALL_FROZEN 0x02</code>, L17–21),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/heap/visibilitymap.c">src/backend/access/heap/visibilitymap.c</a>
+        (<code>visibilitymap_set</code> L274),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/heap/vacuumlazy.c">src/backend/access/heap/vacuumlazy.c</a>
+        (<code>lazy_scan_heap</code>, вызов <code>visibilitymap_set</code> L1553),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/explain.c">src/backend/commands/explain.c</a>
+        (вывод «Heap Fetches» L1993).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 14 Indexing (составные и многоключевые индексы, § 14.6; отдельного параграфа о покрывающих индексах в оглавлении главы нет).</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекции #08–09 Tree Indexes (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

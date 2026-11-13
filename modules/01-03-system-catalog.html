@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 1.3. Системный каталог и information_schema — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="01-03-system-catalog">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m01">Модуль 1. Основы и реляционная модель</a> /
+    <span aria-current="page">Глава 1.3. Системный каталог и information_schema</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 1.3. Системный каталог и information_schema</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T03 · PostgreSQL 17.11</p>
+
+    <h2>Откуда приложение узнаёт, какие есть таблицы и столбцы</h2>
+    <p>Задача из практики: миграция проверяет, что таблица <code>books</code> существует;
+    форма в админке строится по списку столбцов; код вывода отчётов перечисляет
+    таблицы схемы. Всем этим сценариям нужно одно и то же — получить <i>описание
+    базы самим SQL-запросом</i>. Метакоманда <code>\d</code> это умеет, но она — часть
+    psql, а приложению нужен SQL. Где сервер хранит ответы на вопросы «какие
+    таблицы есть и каковы их столбцы» — тема этой главы.</p>
+
+    <h2>Системный каталог: метаданные — это тоже таблицы</h2>
+    <p>Ответ документации короткий: «Системные каталоги — это место, где СУБД
+    хранит метаданные схемы: сведения о таблицах и столбцах, а также служебную
+    информацию. Системные каталоги PostgreSQL — обычные таблицы» (дословно в
+    переводе; глава «System Catalogs»,
+    <a href="https://www.postgresql.org/docs/17/catalogs.html">/docs/17/catalogs.html</a>).
+    Из двух следствий второе — предостережение из той же главы: с каталогами
+    можно делать всё, что с таблицами (DROP, INSERT, UPDATE), «и таким образом
+    основательно сломать систему»; менять их вручную не нужно.</p>
+    <p>Где именно лежат каталоги: «в дополнение к public и пользовательским
+    схемам каждая база содержит схему pg_catalog, в которой находятся системные
+    таблицы, все встроенные типы данных, функции и операторы» — раздел 5.10.5
+    «The System Catalog Schema»
+    (<a href="https://www.postgresql.org/docs/17/ddl-schemas.html">/docs/17/ddl-schemas.html</a>).</p>
+
+    <h3>Пример: pg_class — реестр таблиц</h3>
+    <p>Самый известный каталог — <code>pg_class</code>: «каталог pg_class
+    описывает таблицы и другие объекты, у которых есть столбцы или которые
+    похожи на таблицу: индексы, последовательности, представления,
+    материализованные представления, составные типы и TOAST-таблицы» — глава
+    51.11,
+    <a href="https://www.postgresql.org/docs/17/catalog-pg-class.html">/docs/17/catalog-pg-class.html</a>.
+    Какой именно это объект, сообщает столбец <code>relkind</code>; его
+    документированные значения: <code>r</code> — обычная таблица,
+    <code>i</code> — индекс, <code>S</code> — последовательность,
+    <code>v</code> — представление, <code>m</code> — материализованное
+    представление и другие.</p>
+    <p>Список обычных таблиц текущей базы:</p>
+
+    <pre><code class="language-sql">SELECT relname, relkind
+FROM pg_class
+WHERE relkind = 'r'
+  AND relnamespace = 'public'::regnamespace;</code></pre>
+
+    <p>Для базы из главы 1.1 будет выведено:</p>
+    <pre class="sample-output"> relname | relkind
+---------+---------
+ authors | r
+ books   | r
+(2 rows)</pre>
+
+    <p>Что выведено и почему: в <code>pg_class</code> по строке на каждый объект базы;
+    фильтр <code>relkind = 'r'</code> оставляет обычные таблицы (значение
+    документировано в 51.11), <code>relname</code> — имя объекта. Второй фильтр
+    обязателен: без него в вывод попадут и системные таблицы —
+    <code>pg_class</code>, <code>pg_attribute</code>, <code>pg_type</code> и ещё
+    сотня с лишним, их в любой базе больше, чем пользовательских, — поэтому
+    отсекаем по схеме: <code>relnamespace</code> хранит OID схемы объекта,
+    а конструкция <code>'public'::regnamespace</code> переводит имя схемы в её
+    OID (51.11). Именно эти
+    данные показывает и <code>\dt</code>, но SQL-запрос работает из любого клиента и
+    приложения.</p>
+
+    <h3>Что ещё умеет psql</h3>
+    <p>Метакоманды psql выводят те же метаданные в готовом виде. Например,
+    структура таблицы <code>books</code> из главы 1.1:</p>
+
+    <pre class="sample-output">bookshelf=# \d books
+                Table "public.books"
+  Column   |  Type   | Collation | Nullable | Default
+-----------+---------+-----------+----------+---------
+ book_id   | integer |           | not null |
+ title     | text    |           | not null |
+ author_id | integer |           |          |
+Indexes:
+    "books_pkey" PRIMARY KEY, btree (book_id)
+Foreign-key constraints:
+    "books_author_id_fkey" FOREIGN KEY (author_id) REFERENCES authors(author_id)</pre>
+
+    <p>Что выведено и почему: столбцы и их типы совпадают с DDL из главы 1.1;
+    <code>book_id</code> и <code>title</code> помечены <code>not null</code>, а <code>author_id</code> — нет: внешний ключ
+    сам по себе не запрещает NULL. Документация прямо предупреждает об этом
+    поведении: «ссылающаяся строка не обязана удовлетворять ограничению
+    внешнего ключа, если хоть один из её ссылающихся столбцов равен NULL»,
+    и если это нежелательно — объявляйте столбец NOT NULL (раздел 5.5.5
+    «Foreign Keys»,
+    <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">/docs/17/ddl-constraints.html</a>;
+    там же: внешний ключ может ссылаться только на первичный или уникальный
+    ключ). Имена ограничений в этом выводе PostgreSQL сгенерировал сам — мы их
+    в DDL не задавали.</p>
+
+    <details class="box">
+      <summary>Об именах сгенерированных ограничений</summary>
+      <p>Имя вида <code>books_author_id_fkey</code> соответствует формату
+      «таблица_столбец_fkey», показанному в документации: в примере
+      нарушения внешнего ключа в туториале сообщение об ошибке называет
+      ограничение <code>weather_city_fkey</code> — для таблицы
+      <code>weather</code> и столбца <code>city</code>
+      (<a href="https://www.postgresql.org/docs/17/tutorial-fk.html">/docs/17/tutorial-fk.html</a>;
+      подробнее — глава 4.2). Документация отмечает лишь, что при
+      отсутствии явного имени «система выберет имя за вас»
+      (<a href="https://www.postgresql.org/docs/17/ddl-constraints.html">5.5.1</a>);
+      полное правило выбора имён (обрезка длинных имён, разрешение
+      коллизий) в документации не зафиксировано.</p>
+    </details>
+
+    <h2>information_schema: стандартная альтернатива</h2>
+    <p>Помимо pg_catalog, есть второй источник метаданных — схема
+    <code>information_schema</code>. Различие принципиально и зафиксировано в
+    документации: «информационная схема определена в стандарте SQL, поэтому её
+    можно считать переносимой и стабильной — в отличие от системных каталогов,
+    специфичных для PostgreSQL» (глава 35,
+    <a href="https://www.postgresql.org/docs/17/information-schema.html">/docs/17/information-schema.html</a>).
+    На практике: пишете код, который должен работать и на других СУБД, —
+    запрашивайте information_schema; готовы к специфике PostgreSQL и нужны
+    детали, которых нет в стандарте, — pg_catalog.</p>
+    <p>Список таблиц через стандартное представление:</p>
+
+    <pre><code class="language-sql">SELECT table_schema, table_name, table_type
+FROM information_schema.tables
+WHERE table_type = 'BASE TABLE';</code></pre>
+
+    <p>Вывод для той же базы:</p>
+    <pre class="sample-output"> table_schema | table_name | table_type
+--------------+------------+------------
+ public       | authors    | BASE TABLE
+ public       | books      | BASE TABLE
+(2 rows)</pre>
+
+    <p>Что выведено и почему: значение <code>BASE TABLE</code> документировано как «обычная
+    постоянная таблица» (persistent base table, the normal table type); весь набор
+    значений <code>table_type</code> (<code>BASE TABLE</code>, <code>VIEW</code>,
+    <code>FOREIGN</code>, <code>LOCAL TEMPORARY</code>) документирован в описании представления
+    <code>information_schema.tables</code>:
+    <a href="https://www.postgresql.org/docs/17/infoschema-tables.html">/docs/17/infoschema-tables.html</a>.
+    Список столбцов конкретной таблицы — представление
+    <code>information_schema.columns</code>
+    (<a href="https://www.postgresql.org/docs/17/infoschema-columns.html">/docs/17/infoschema-columns.html</a>),
+    где столбец <code>data_type</code> показывает имя типа столбца, если тот встроенный:</p>
+
+    <pre><code class="language-sql">SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'books';</code></pre>
+
+    <h2>Системные представления: метаданные о работе сервера</h2>
+    <p>Кроме описания объектов, PostgreSQL публикует данные о собственном
+    состоянии — в системных представлениях (глава 52,
+    <a href="https://www.postgresql.org/docs/17/views.html">/docs/17/views.html</a>).
+    Классический пример — <code>pg_stat_activity</code>: «одна строка на
+    каждый серверный процесс с информацией о его текущей активности»
+    (глава 27,
+    <a href="https://www.postgresql.org/docs/17/monitoring-stats.html">/docs/17/monitoring-stats.html</a>).
+    Это представление определено в исходном коде сервера в файле
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/system_views.sql#L865">src/backend/catalog/system_views.sql,
+    строка 865</a> на базовом коммите (оператор <code>CREATE VIEW pg_stat_activity
+    AS</code> — номер строки проверен на этом коммите):</p>
+
+    <pre><code class="language-sql">SELECT pid, state, query
+FROM pg_stat_activity;</code></pre>
+
+    <p>Систематический мониторинг сервера — тема уровня middle+ и в этот
+    учебник не входит (правила проекта, <code>00_rules.md</code>); здесь
+    <code>pg_stat_activity</code> — лишь пример того, что «состояние сервера тоже
+    таблица».</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Приложение должно работать на PostgreSQL и, возможно,
+      на другой СУБД. Каким источником метаданных пользоваться и почему?</summary>
+      <p><b>Ответ.</b> information_schema: она определена стандартом SQL и
+      позиционируется как переносимая и стабильная, тогда как системные
+      каталоги pg_catalog специфичны для PostgreSQL — формулировка из главы 35:
+      <a href="https://www.postgresql.org/docs/17/information-schema.html">/docs/17/information-schema.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Напишите запрос, который перечислит обычные таблицы
+      текущей базы, используя pg_catalog.</summary>
+      <p><b>Ответ.</b> <code>SELECT relname FROM pg_class WHERE relkind =
+      'r' AND relnamespace = 'public'::regnamespace;</code> — pg_class
+      описывает таблицы и подобные объекты, relkind =
+      'r' документирован как «обычная таблица», а фильтр по схеме
+      отсекает системные таблицы (глава 51.11:
+      <a href="https://www.postgresql.org/docs/17/catalog-pg-class.html">/docs/17/catalog-pg-class.html</a>).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем опасно, что каталоги — «обычные таблицы»?</summary>
+      <p><b>Ответ.</b> Опасность в симметрии прав: с ними работают те же
+      команды SQL (вставка, изменение, удаление строк), поэтому неосторожный
+      запрос испортит сами метаданные. Документация предупреждает об этом
+      прямо: «можно… основательно сломать систему» —
+      <a href="https://www.postgresql.org/docs/17/catalogs.html">/docs/17/catalogs.html</a>.
+      Читать каталоги — нормально, изменять их напрямую — нет.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="01-02-cluster-database-role-psql.html">← Предыдущая: 1.2. Кластер, база данных, роль; psql</a>
+      <a class="next" href="../modules/02-01-select-where-null.html">Следующий модуль: 2.1. SELECT: проекция, WHERE, NULL →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/catalogs.html">System Catalogs (гл. 51)</a>,
+        <a href="https://www.postgresql.org/docs/17/catalog-pg-class.html">pg_class (51.11)</a>,
+        <a href="https://www.postgresql.org/docs/17/views.html">System Views (гл. 52)</a>,
+        <a href="https://www.postgresql.org/docs/17/information-schema.html">The Information Schema (гл. 35)</a>,
+        <a href="https://www.postgresql.org/docs/17/infoschema-tables.html">information_schema.tables</a>,
+        <a href="https://www.postgresql.org/docs/17/infoschema-columns.html">information_schema.columns</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-schemas.html">Schemas (5.10)</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">Constraints (5.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/monitoring-stats.html">The Statistics Collector (гл. 27)</a>,
+        <a href="https://www.postgresql.org/docs/17/app-psql.html">psql (Reference)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/system_views.sql#L865">src/backend/catalog/system_views.sql#L865</a>
+        (определение представления pg_stat_activity).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.5. Подзапросы — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-05-subqueries">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.5. Подзапросы</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.5. Подзапросы</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T08 · PostgreSQL 17.11</p>
+
+    <h2>«Книги выше среднего» и «авторы без книг»: два запроса, которые не написать без подзапроса</h2>
+    <p>«Выведи книги с рейтингом выше среднего» — порог заранее неизвестен:
+    он сам вычисляется по таблице. «Выведи авторов, у которых нет ни одной
+    книги» — требует сравнения каждого автора со <i>всем множеством</i>
+    книг. Обе задачи решаются подзапросом: SELECT внутри другого
+    оператора. У второй задачи есть знаменитая ловушка с <code>NOT IN</code>, на
+    которой спотыкаются и опытные разработчики, — разберём её на наших
+    данных (в <code>books.author_id</code> есть NULL у «Детектива», в <code>authors</code>
+    есть Крылов без книг).</p>
+
+    <h2>Скалярный подзапрос: значение из запроса</h2>
+    <p>«Скалярный подзапрос — это обычный SELECT-запрос в скобках,
+    который возвращает ровно одну строку с одним столбцом... Запрос
+    выполняется, и единственное возвращённое значение используется во
+    внешнем выражении значений. Использовать запрос, возвращающий больше
+    одной строки или больше одного столбца, — ошибка. (Но если при
+    конкретном выполнении подзапрос не возвращает строк, ошибки нет:
+    скалярный результат считается NULL.)» — раздел 4.2.11 Scalar
+    Subqueries,
+    <a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>.</p>
+
+    <pre><code class="language-sql">SELECT title, rating
+FROM books
+WHERE rating > (SELECT avg(rating) FROM books)
+ORDER BY book_id;</code></pre>
+
+    <pre class="sample-output">     title      | rating
+---------------+--------
+ Евгений Онегин|      5
+ Война и мир   |      5
+(2 rows)</pre>
+
+    <p>Что выведено и почему: средний рейтинг по не-NULL значениям равен
+    4.2 (глава 2.4); порог вычислен один раз и сравнён с каждой строкой;
+    строго выше 4.2 — две книги. Подзапрос здесь некоррелированный: не
+    зависит от строк внешнего запроса.</p>
+
+    <h2>Табличный подзапрос в FROM</h2>
+    <p>Подзапрос может стоять и в FROM — как источник строк: «подзапросы,
+    задающие производную таблицу, заключаются в скобки. Им можно назначить
+    псевдоним таблицы и, опционально, псевдонимы столбцов... Более
+    интересные случаи, которые не сводятся к обычному соединению,
+    возникают, когда подзапрос включает группировку или агрегацию»
+    (раздел 7.2.1.3 Subqueries,
+    <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">/docs/17/queries-table-expressions.html</a>).
+    Пример: средний рейтинг автора — но только у плодовитых авторов со
+    средним не ниже 4.5; двухшаговая задача, где первый шаг «свернуть»,
+    второй «отфильтровать»:</p>
+
+    <pre><code class="language-sql">SELECT name, avg_rating, books_cnt
+FROM (
+    SELECT a.name, avg(b.rating) AS avg_rating,
+           count(*) AS books_cnt
+    FROM authors a JOIN books b ON b.author_id = a.author_id
+    GROUP BY a.author_id, a.name
+) AS author_stats
+WHERE avg_rating >= 4.5
+  AND books_cnt > 1
+ORDER BY avg_rating DESC;</code></pre>
+
+    <pre class="sample-output">     name      |     avg_rating     | books_cnt
+----------------+--------------------+-----------
+ Лев Толстой  | 5.0000000000000000 |         2
+ Александр Пушкин | 4.5000000000000000 |         2
+(2 rows)</pre>
+
+    <p>Что выведено и почему: внутренний SELECT сгруппировал книги по
+    авторам (по правилам главы 2.4), внешний отфильтровал результат как
+    обычную таблицу. Обратите внимание на обязательный по смыслу
+    псевдоним <code>author_stats</code> — производная таблица в FROM обязана иметь
+    имя. Оба фильтра второго шага сработали по-разному: Гоголь
+    (одна книга, среднее 4) не прошёл ни <code>avg_rating &gt;= 4.5</code>, ни
+    <code>books_cnt &gt; 1</code>; Крылов вообще без книг не попал во внутренний
+    SELECT — INNER JOIN его отсеял. (Среднее Пушкина 4.5 — (5+4)/2;
+    Толстого 5 — NULL «Анны Карениной» не участвует.)</p>
+
+    <h2>IN и NOT IN: сравнение со множеством</h2>
+    <p>«Левое выражение вычисляется и сравнивается с каждой строкой
+    результата подзапроса. Результат IN — true, если найдена хоть одна
+    равная строка подзапроса. Результат false, если равной строки нет
+    (включая случай, когда подзапрос не возвращает строк)» — раздел
+    9.24.2,
+    <a href="https://www.postgresql.org/docs/17/functions-subquery.html">/docs/17/functions-subquery.html</a>.
+    Ловушка — в NULL, и документация описывает её дословно: «если левое
+    выражение даёт NULL, или если нет равных правых значений и хотя бы
+    одна строка справа даёт NULL, результат конструкции IN будет NULL,
+    а не false» (там же). Для NOT IN — зеркально: «...результатом NOT IN
+    будет NULL, а не true» (раздел 9.24.3 там же).</p>
+    <p>Смотрим на нашу задачу «авторы без книг»:</p>
+
+    <pre><code class="language-sql">SELECT name
+FROM authors
+WHERE author_id NOT IN (SELECT author_id FROM books);</code></pre>
+
+    <pre class="sample-output"> name
+------
+(0 rows)</pre>
+
+    <p>Что выведено и почему: <b>ни одной строки, хотя Крылов без книг в
+    базе есть</b>. Подзапрос вернул значения {1, 1, 2, 3, 3, NULL} — среди
+    них NULL («Детектив» без автора). Для Крылова (author_id = 4) нет
+    равных значений, но есть NULL справа — и <code>NOT IN</code> даёт NULL, строка
+    отбрасывается WHERE (глава 2.1). Так NULL одного-единственного
+    «Детектива» обнуляет весь отчёт. Уберите NULL из подзапроса — и всё
+    заработает: <code>NOT IN (SELECT author_id FROM books WHERE author_id IS
+    NOT NULL)</code> вернёт Крылова.</p>
+
+    <h2>EXISTS и NOT EXISTS: «есть ли строки»</h2>
+    <p>«Аргумент EXISTS — произвольный оператор SELECT или подзапрос.
+    Подзапрос вычисляется, чтобы определить, возвращает ли он строки.
+    Если он возвращает хотя бы одну строку, результат EXISTS — true, если
+    не возвращает — false. Подзапрос может ссылаться на переменные
+    окружающего запроса, которые ведут себя как константы при любом
+    отдельном вычислении подзапроса. Подзапрос обычно выполняется ровно
+    настолько, насколько нужно, чтобы определить, есть ли хотя бы одна
+    строка, а не до конца» — раздел 9.24.1,
+    <a href="https://www.postgresql.org/docs/17/functions-subquery.html">/docs/17/functions-subquery.html</a>.
+    Три выделенных факта — три свойства EXISTS: он возвращает булево
+    значение без NULL-тонкостей; подзапрос внутри него может быть
+    коррелированным — ссылаться на строки внешнего запроса, как в
+    примере ниже (но может быть и независимым, как подзапрос во
+    FROM); и ему не нужно полное вычисление подзапроса.</p>
+    <p>Надёжная версия задачи про авторов без книг:</p>
+
+    <pre><code class="language-sql">SELECT a.name
+FROM authors a
+WHERE NOT EXISTS (
+    SELECT 1 FROM books b WHERE b.author_id = a.author_id
+);</code></pre>
+
+    <pre class="sample-output">    name
+-------------
+ Иван Крылов
+(1 row)</pre>
+
+    <p>Что выведено и почему: для каждого автора подзапрос ищет хотя бы
+    одну его книгу (связь через <code>b.author_id = a.author_id</code> — корреляция);
+    EXISTS у Крылова — false, NOT EXISTS — true. NULL в чужих строках на
+    результат не влияет: сравнение <code>b.author_id = a.author_id</code> для
+    NULL-строки даёт NULL, эта строка подзапроса просто не находится —
+    но другие строки, если они есть, корректно дают true. Правило
+    практической безопасности: <b>если в подзапросе возможен NULL в
+    сравниваемом столбце — используйте NOT EXISTS вместо NOT IN</b>.</p>
+
+    <h2>ANY/SOME и ALL: сравнение с каждой строкой</h2>
+    <p>«Левое выражение вычисляется и сравнивается с каждой строкой
+    результата подзапроса с помощью заданного оператора... Результат
+    ANY — true, если получено хотя бы одно true... SOME — синоним ANY.
+    IN эквивалентен = ANY» — раздел 9.24.4; «...Результат ALL — true,
+    если все строки дают true (включая случай, когда подзапрос не
+    возвращает строк). NOT IN эквивалентен &lt;&gt; ALL» — раздел 9.24.5
+    (оба —
+    <a href="https://www.postgresql.org/docs/17/functions-subquery.html">/docs/17/functions-subquery.html</a>).
+    Пример: книги с максимальным рейтингом без GROUP BY и MAX:</p>
+
+    <pre><code class="language-sql">SELECT title, rating
+FROM books
+WHERE rating >= ALL (SELECT rating FROM books WHERE rating IS NOT NULL)
+ORDER BY book_id;</code></pre>
+
+    <pre class="sample-output">     title      | rating
+---------------+--------
+ Евгений Онегин|      5
+ Война и мир   |      5
+(2 rows)</pre>
+
+    <p>Что выведено и почему: условие «рейтинг больше или равен каждому
+    не-NULL рейтингу таблицы» истинно только для максимального значения.
+    NULL в подзапросе пришлось исключить явно: <code>5 &gt;= NULL</code> даёт NULL, и
+    с NULL внутри множества ALL не пришёл бы к true ни для одной строки
+    — трёхзначная логика из главы 2.1 работает и здесь.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>author_id NOT IN (SELECT author_id FROM
+      books)</code> вернул 0 строк, хотя в базе есть автор без книг? Как
+      починить двумя способами?</summary>
+      <p><b>Ответ.</b> В подзапросе есть NULL (книга без автора): «если
+      нет равных правых значений и хотя бы одна строка справа даёт NULL,
+      результат NOT IN — NULL, а не true», и WHERE отбрасывает такие
+      строки (9.24.3
+      <a href="https://www.postgresql.org/docs/17/functions-subquery.html">/docs/17/functions-subquery.html</a>).
+      Способы: исключить NULL из подзапроса (<code>WHERE author_id IS NOT
+      NULL</code>) или переписать на <code>NOT EXISTS (...)</code> — он не чувствителен
+      к NULL.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем коррелированный подзапрос отличается от
+      некоррелированного в плане вычисления?</summary>
+      <p><b>Ответ.</b> Некоррелированный не зависит от строк внешнего
+      запроса — его результат можно вычислить один раз (как средний
+      рейтинг выше). Коррелированный ссылается на переменные окружающего
+      запроса («ведут себя как константы при любом отдельном вычислении
+      подзапроса» — 9.24.1) и вычисляется в контексте каждой внешней
+      строки: как EXISTS для каждого автора в нашем примере.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Что вернёт <code>SELECT 5 = ANY (SELECT rating FROM
+      books)</code> при рейтингах {5, 4, 4, 5, NULL, 3}? А <code>5 = ALL (...)</code>?</summary>
+      <p><b>Ответ.</b> ANY: true — есть строки, где сравнение 5 = 5
+      истинно (для NULL-строки сравнение даёт NULL, но достаточно одного
+      true). ALL: false — есть строки (например, rating = 4), где
+      сравнение даёт false; ALL даёт NULL, когда среди сравнений нет
+      ни одного false и есть хотя бы одно NULL (правила ANY/ALL —
+      9.24.4–9.24.5
+      <a href="https://www.postgresql.org/docs/17/functions-subquery.html">/docs/17/functions-subquery.html</a>).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-04-group-by-having.html">← Предыдущая: 2.4. Агрегация: GROUP BY и HAVING</a>
+      <a class="next" href="02-06-cte-with.html">Следующая: 2.6. Общие табличные выражения (WITH) →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/functions-subquery.html">Subquery Expressions (9.24)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-expressions.html">Scalar Subqueries (4.2.11)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Table Expressions / Subqueries in FROM (7.2.1.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference)</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts, 7th ed. —
+        глава 3, раздел «Nested Subqueries».
+        <a href="https://db-book.com/">db-book.com</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 6.4
+        (подзапросы).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

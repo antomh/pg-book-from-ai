@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.6. Приведение и разрешение типов — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-06-type-conversion">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.6. Приведение и разрешение типов</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.6. Приведение и разрешение типов</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T17 · PostgreSQL 17.11</p>
+
+    <h2>Почему одно сравнение молчит, а другое падает</h2>
+    <p>Два запроса, которые пишут новички:</p>
+
+    <pre><code class="language-sql">SELECT '123' = 123;
+SELECT 'abc'::varchar = 42;</code></pre>
+
+    <p>Первый вернёт <code>t</code>, второй — ошибку «operator does not exist:
+    character varying = integer». Снаружи выглядит непоследовательно:
+    строку с числом сравнить можно, varchar с числом — нельзя. На самом
+    деле оба результата следуют из одного алгоритма — правил разрешения
+    типов, которые PostgreSQL применяет к каждому выражению. Эта глава
+    разбирает алгоритм: как читаются <code>CAST</code> и <code>::</code>, что такое
+    «неизвестный» тип литерала, как сервер выбирает перегруженный
+    оператор и почему он отказывается угадывать там, где результат был
+    бы неожиданным.</p>
+
+    <h2>Явное приведение: CAST и ::</h2>
+    <p>Раздел 4.2.9 Type Casts
+    (<a href="https://www.postgresql.org/docs/17/sql-expressions.html">/docs/17/sql-expressions.html</a>):
+    «приведение типа задаёт преобразование из одного типа данных в
+    другой. PostgreSQL принимает два эквивалентных синтаксиса:</p>
+
+    <pre><code class="language-sql">CAST ( expression AS type )
+expression::type</code></pre>
+
+    <p>Синтаксис CAST соответствует SQL; синтаксис с :: — историческое
+    употребление PostgreSQL». Уточнение оттуда же: «когда приведение
+    применяется к выражению значения известного типа, оно обозначает
+    преобразование во время выполнения. Приведение успешно, только
+    если определена подходящая операция преобразования. Обратите
+    внимание: это тонко отличается от использования приведений с
+    константами — приведение, применённое к простому строковому
+    литералу, задаёт начальное присвоение типа литеральной константе
+    и успешно для любого типа (если содержимое литерала — допустимый
+    синтаксис ввода для этого типа)». То есть <code>&#x27;123&#x27;::integer</code> — не
+    «конвертация строки в число», а чтение литерала сразу как
+    числа; а вот <code>price::integer</code>, где <code>price</code> — колонка numeric, —
+    настоящее преобразование значения.</p>
+
+    <h2>Модель: строгая типизация и литералы «unknown»</h2>
+    <p>«SQL — строго типизированный язык: каждый элемент данных имеет
+    связанный тип, определяющий его поведение и допустимое
+    использование» — так начинается глава 10 Type Conversion
+    (<a href="https://www.postgresql.org/docs/17/typeconv-overview.html">/docs/17/typeconv-overview.html</a>,
+    10.1). Дальше — ключевой механизм: «сканер/парсер PostgreSQL делит
+    лексические элементы на пять фундаментальных категорий: целые,
+    нецелые числа, строки, идентификаторы и ключевые слова. Константы
+    большинства нечисловых типов сначала классифицируются как строки.
+    Если тип для строкового литерала не указан, сначала назначается
+    тип-заполнитель <b>unknown</b>, который разрешается на следующих
+    стадиях».</p>
+    <p>Отсюда разница из начала главы. В <code>&#x27;123&#x27; = 123</code> правый операнд
+    — тип unknown, и правило разрешения операторов гласит дословно:
+    «если один аргумент вызова бинарного оператора имеет тип unknown,
+    для этой проверки предполагается, что он того же типа, что и другой
+    аргумент» (10.2,
+    <a href="https://www.postgresql.org/docs/17/typeconv-oper.html">/docs/17/typeconv-oper.html</a>).
+    Находится оператор <code>integer = integer</code> — сравнение чисел, результат
+    <code>t</code>.</p>
+    <p>А в <code>&#x27;abc&#x27;::varchar = 42</code> левый операнд уже типизирован
+    (<code>character varying</code>), правый — <code>integer</code>: оператора
+    <code>varchar = integer</code> в системе нет, и неявного приведения между
+    строковой и числовой категориями тоже нет — сервер отказывается
+    угадывать. Сообщение об ошибке рождается в
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_oper.c#L637-L642">src/backend/parser/parse_oper.c,
+    строки 637–642</a> на базовом коммите: <code>errmsg(&quot;operator does not
+    exist: %s&quot;)</code> и подсказка «No operator matches the given name and
+    argument types. You might need to add explicit type casts.»:</p>
+
+    <pre class="sample-output">ERROR:  operator does not exist: character varying = integer
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.</pre>
+
+    <p>Лечение — явное приведение любой стороны: <code>book_id::varchar =
+    &#x27;42&#x27;</code> (сравнение строк) или <code>&#x27;42&#x27;::integer = book_id</code> (сравнение
+    чисел).</p>
+
+    <h2>Как выбирается оператор: шаги алгоритма</h2>
+    <p>Документация (10.2) описывает процедуру для выражения с
+    оператором — сокращённо, без деталей поиска по схеме:</p>
+    <ol>
+      <li>Из каталога <code>pg_operator</code> отбираются операторы с совпадающими
+        именем и числом аргументов, видимыми в текущем search path.</li>
+      <li>Ищется оператор, принимающий <b>точно</b> типы аргументов;
+        если один аргумент unknown — для этой проверки он считается
+        типом второго аргумента.</li>
+      <li>Отбрасываются кандидаты, к типам которых аргументы нельзя
+        неявно преобразовать.</li>
+      <li>Оставляются кандидаты с наибольшим числом <b>точных</b>
+        совпадений типов; затем — те, что принимают
+        <b>предпочтительные</b> (preferred) типы категории аргументов.</li>
+      <li>Для аргументов типа unknown выбирается категория (со
+        смещением к строковой — «неизвестный литерал выглядит как
+        строка»); если останется несколько кандидатов — ошибка
+        неоднозначности.</li>
+    </ol>
+    <p>Про категории: «типы данных делятся на несколько базовых
+    категорий, включая boolean, numeric, string, bitstring, datetime,
+    timespan, geometric, network и пользовательские. В каждой
+    категории может быть один или несколько предпочтительных типов
+    (preferred types), которые предпочитаются при выборе из возможных
+    типов» (10.1). Информация о существующих приведениях хранится в
+    системных каталогах, а новые задаются командой CREATE CAST (там
+    же; для встроенных типов набор приведений «тщательно подобран и
+    его лучше не менять»).</p>
+
+    <h3>Три примера из документации</h3>
+    <p><b>Пример 1 (точное совпадение после unknown):</b>
+    <code>SELECT 'abc' || 'def';</code> — «в этом случае нет
+    первоначальной подсказки, какой тип использовать... парсер ищет
+    всех кандидатов и находит, что есть кандидаты, принимающие вход
+    категорий string и bit-string. Поскольку категория string
+    предпочтительна, когда доступна, выбирается она, а затем
+    предпочтительный тип строк text используется как конкретный тип
+    для разрешения литералов unknown» — результат <code>abcdef</code> (пример
+    10.2 из 10.2 документации).</p>
+    <p><b>Пример 2 (preferred тип категории):</b> <code>SELECT |/
+    40;</code> — «в стандартном каталоге есть только один оператор
+    квадратного корня (префиксный |/), и он принимает аргумент типа
+    double precision. Сканер назначает аргументу начальный тип
+    integer. Поэтому парсер выполняет преобразование типа операнда, и
+    запрос эквивалентен <code>|/ CAST(40 AS double precision)</code>» — вывод
+    <code>6.324555320336759</code> (пример 10.1).</p>
+    <p><b>Пример 2.5 (известные типы, но не строковые):</b>
+    <code>SELECT 2 || 3;</code> — оба аргумента теперь типизированы
+    (<code>integer</code>), литералов unknown нет, и шаг 2 алгоритма ищет
+    оператор <code>||</code> для <code>integer, integer</code>: такого в
+    <code>pg_operator</code> нет. Неявного приведения из числовой категории в
+    строковую тоже нет (в <code>pg_cast</code> такое приведение отсутствует, и
+    шаг 3 никого не оставляет), поэтому результат:</p>
+
+    <pre class="sample-output">ERROR:  operator does not exist: integer || integer
+LINE 1: SELECT 2 || 3;
+               ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.</pre>
+
+    <p>Почему сервер не «помог» превратить двойку в строку: правила
+    неявных преобразований «тщательно подобраны» и превращение числа
+    в текст молча — именно «удивительный результат», которого 10.1
+    избегает; выражение исправляется явным приведением
+    <code>2::text || 3::text</code> → <code>23</code>. Это зеркальный случай к
+    <code>'123' = 123</code> из вводки: там unknown-литерал подстроился под
+    число, а здесь известные числа не подстраиваются под строки.</p>
+    <p><b>Пример 3 (preferred тип проявляется в ошибке):</b>
+    <code>SELECT @ '-4.5e500';</code> — оператор модуля @ для
+    unknown-литерала выбирает предпочтительный тип числовой категории
+    float8, а литерал не помещается в него: <code>ERROR: &quot;-4.5e500&quot; is out
+    of range for type double precision</code> (пример 10.3). Так проявляется
+    принцип из 10.1: «неявные преобразования не должны иметь
+    удивительных или непредсказуемых результатов» — сервер скорее
+    честно упадёт, чем молча сделает не то.</p>
+
+    <h2>Приведение при записи в столбец</h2>
+    <p>Отдельный контекст — присваивание: «операторы INSERT и UPDATE
+    помещают результаты выражений в таблицу. Выражения должны быть
+    согласованы с типами целевых столбцов и, возможно, преобразованы к
+    ним» (10.1, четвёртая «фундаментальная конструкция» — value
+    storage; правила — раздел 10.4 Value Storage). Поэтому вставка
+    литерала в типизированный столбец работает без явных <code>::</code>:</p>
+
+    <pre><code class="language-sql">INSERT INTO editions (edition_id, book_id, format, price)
+VALUES (7, 2, 'pdf', 350);</code></pre>
+
+    <p>Что произойдёт и почему: литерал <code>350</code> имеет начальный тип
+    unknown и приведётся к типу столбца <code>numeric(6,2)</code> в контексте
+    присваивания; в таблице окажется <code>350.00</code>. То же правило
+    разрешает и <code>VALUES (7, 2, &#x27;pdf&#x27;, &#x27;350&#x27;)</code> — строковый литерал
+    разобран как numeric. Но <code>VALUES (7, 2, &#x27;pdf&#x27;, &#x27;abc&#x27;)</code> — ошибка
+    ввода: содержимое литерала не является допустимым синтаксисом
+    numeric (правило «успешно для любого типа (если содержимое
+    литерала — допустимый синтаксис ввода)», 4.2.9).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>SELECT &#x27;123&#x27; = 123;</code> работает, а
+      <code>SELECT &#x27;123&#x27;::varchar = 123;</code> — нет?</summary>
+      <p><b>Ответ.</b> В первом случае <code>&#x27;123&#x27;</code> — литерал типа unknown:
+      «если один аргумент вызова бинарного оператора имеет тип
+      unknown, для этой проверки предполагается, что он того же типа,
+      что и другой аргумент» (10.2) — находится <code>integer = integer</code>.
+      Во втором тип уже известен (varchar), оператора
+      <code>varchar = integer</code> нет, неявного приведения между строковой и
+      числовой категориями нет — ошибка «operator does not exist»
+      (текст — parse_oper.c#L637–642 на базовом коммите). Исправление —
+      явный CAST: <code>&#x27;123&#x27;::integer = 123</code>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что вернёт <code>SELECT &#x27;abc&#x27; || &#x27;def&#x27;;</code> и по
+      каким шагам сервер пришёл к этому типу?</summary>
+      <p><b>Ответ.</b> <code>abcdef</code> типа text. Оба литерала — unknown;
+      точного совпадения нет; среди кандидатов есть принимающие
+      категорию string и bit-string; «поскольку категория string
+      предпочтительна, когда доступна, выбирается она, и затем
+      предпочтительный тип строк text используется как конкретный тип
+      для разрешения литералов unknown» (пример 10.2 из 10.2
+      документации).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем <code>&#x27;350&#x27;::numeric</code> как приведение литерала
+      отличается от <code>price::integer</code> для колонки price типа numeric?
+      Почему первое «срабатывает всегда», а второе — нет?</summary>
+      <p><b>Ответ.</b> «Приведение, применённое к простому строковому
+      литералу, задаёт начальное присвоение типа литеральной константе
+      и успешно для любого типа (если содержимое литерала — допустимый
+      синтаксис ввода для этого типа)». А приведение значения
+      известного типа — «преобразование во время выполнения...
+      успешно, только если определена подходящая операция
+      преобразования» (4.2.9). numeric → integer операция определена
+      (с округлением), а вот, например, record → integer — нет.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-05-json-jsonb.html">← Предыдущая: 3.5. JSON и JSONB</a>
+      <a class="next" href="04-01-create-table.html">Следующий модуль: 4.1. Создание таблиц и типы ключей →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/typeconv-overview.html">Type Conversion: Overview (10.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/typeconv-oper.html">Operator Type Resolution (10.2, примеры 10.1–10.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/typeconv.html">Type Conversion (гл. 10, оглавление)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-expressions.html">Type Casts (4.2.9)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_oper.c#L637-L642">src/backend/parser/parse_oper.c#L637-L642</a>
+        (сообщения «operator does not exist» и подсказка о явных
+        приведениях).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

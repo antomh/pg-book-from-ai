@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 6.1. Транзакции и ACID — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="06-01-transactions-acid">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m06">Модуль 6. Транзакции и конкурентность</a> /
+    <span aria-current="page">Глава 6.1. Транзакции и ACID</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 6.1. Транзакции и ACID</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T27 · PostgreSQL 17.11</p>
+
+    <h2>Архивация отзыва оборвалась на середине</h2>
+    <p>Служебный скрипт переносит старые отзывы в архивную таблицу:
+    сначала <code>INSERT</code> копию в <code>reviews_archive</code>, затем <code>DELETE</code> из
+    <code>reviews</code>. Посреди ночи закончилось место на диске — между
+    вставкой и удалением. Итог: часть отзывов лежит в двух таблицах
+    сразу, часть — только в старой, а отчёт по утру показывает
+    дубли. Ровно эту проблему снимают транзакции: «существенная
+    сторона транзакции в том, что она объединяет несколько шагов в
+    единую операцию "всё или ничего". Промежуточные состояния между
+    шагами не видны другим конкурентным транзакциям, а если
+    происходит сбой, мешающий завершить транзакцию, ни один из
+    шагов вообще не затрагивает базу данных» —
+    (<a href="https://www.postgresql.org/docs/17/tutorial-transactions.html">/docs/17/tutorial-transactions.html</a>,
+    3.4, перевод дословный).</p>
+
+    <h2>Классика: перевод денег</h2>
+    <p>Документация иллюстрирует транзакцию банковским переводом:
+    списать с одного счёта, зачислить на другой — несколько
+    отдельных UPDATE, которые «должны произойти все — или не
+    произойти ни один». Из этого примера выводится и первое
+    свойство: «транзакция называется атомарной: с точки зрения
+    других транзакций она происходит либо полностью, либо вовсе
+    нет» (3.4). В терминах теории: атомарность — одно из четырёх
+    свойств ACID (Atomicity, Consistency, Isolation, Durability;
+    Silberschatz, 7-е изд., гл. 17.1). Атомарность в PostgreSQL —
+    это и есть «всё или ничего» на ROLLBACK и при сбое.</p>
+
+    <h2>BEGIN, COMMIT, ROLLBACK</h2>
+    <p>«В PostgreSQL транзакция оформляется окружением SQL-команд
+    транзакции командами BEGIN и COMMIT» (3.4). Справочник
+    уточняет:
+    «BEGIN инициирует блок транзакции, то есть все операторы после
+    команды BEGIN будут выполнены в единой транзакции, пока не
+    дан явный COMMIT или ROLLBACK»
+    (<a href="https://www.postgresql.org/docs/17/sql-begin.html">/docs/17/sql-begin.html</a>).
+    Архивная задача с входной проблемой теперь выглядит так:</p>
+
+    <pre><code class="language-sql">CREATE TABLE reviews_archive (
+    review_id  integer PRIMARY KEY,
+    book_id    integer,
+    reader_id  integer,
+    rating     smallint NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    comment    text,
+    created_at timestamptz NOT NULL
+);
+
+BEGIN;
+
+INSERT INTO reviews_archive (review_id, book_id, reader_id, rating, comment, created_at)
+SELECT review_id, book_id, reader_id, rating, comment, created_at
+FROM reviews WHERE review_id = 10;
+
+DELETE FROM reviews WHERE review_id = 10;
+
+COMMIT;</code></pre>
+
+    <pre class="sample-output">BEGIN
+INSERT 0 1
+DELETE 1
+COMMIT</pre>
+
+    <p>Что выведено и почему: теги команд из главы 5 — по одному на
+    оператор; psql просто повторяет <code>BEGIN</code> и <code>COMMIT</code>. После COMMIT
+    пара «вставка + удаление» неделима: другого сеанса, который мог
+    бы увидеть архивированный отзыв в обеих таблицах, больше не
+    существует (видимость изменений — тема глав 6.3–6.4). Если
+    посреди блока передумать или словить ошибку — откат:</p>
+
+    <pre><code class="language-sql">BEGIN;
+
+INSERT INTO reviews_archive (review_id, book_id, reader_id, rating, comment, created_at)
+SELECT review_id, book_id, reader_id, rating, comment, created_at
+FROM reviews WHERE review_id = 9;
+
+DELETE FROM reviews WHERE review_id = 9;
+
+ROLLBACK;</code></pre>
+
+    <pre class="sample-output">BEGIN
+INSERT 0 1
+DELETE 1
+ROLLBACK</pre>
+
+    <p>Что выведено и почему: оба оператора отработали, но «ROLLBACK
+    откатывает текущую транзакцию и приводит к отбрасыванию всех
+    изменений, сделанных транзакцией»
+    (<a href="https://www.postgresql.org/docs/17/sql-rollback.html">/docs/17/sql-rollback.html</a>):
+    строка 9 осталась в <code>reviews</code>, в архиве — ничего. Отметим
+    поведение на пустом месте: «выдача ROLLBACK вне блока
+    транзакции выдаёт предупреждение и не имеет другого эффекта»
+    (Notes, sql-rollback), то же — для COMMIT.</p>
+
+    <h2>Одиночный оператор — тоже транзакция</h2>
+    <p>Ключевой факт, который часто упускают: «PostgreSQL фактически
+    рассматривает каждый SQL-оператор как выполняемый внутри
+    транзакции. Если команда BEGIN не выдана, каждый отдельный
+    оператор имеет неявные BEGIN и (в случае успеха) COMMIT,
+    обёрнутые вокруг него» (3.4). Справочник называет это режимом
+    autocommit: «по умолчанию (без BEGIN) PostgreSQL выполняет
+    транзакции в режиме "autocommit", то есть каждый оператор
+    выполняется в собственной транзакции, и фиксация неявно
+    выполняется в конце оператора (если выполнение было успешным,
+    иначе выполняется откат)» (sql-begin, Description). Поэтому
+    одиночный <code>INSERT</code> из главы 5.1 не требовал BEGIN: он и был
+    транзакцией — из одного оператора. Предупреждение о
+    клиентских библиотеках: «некоторые клиентские библиотеки
+    автоматически выдают команды BEGIN и COMMIT, так что вы можете
+    получать эффект блоков транзакций, не прося их» (3.4, Note).</p>
+
+    <h2>Долговечность: WAL одной фразой</h2>
+    <p>Второе свойство ACID — долговечность: «транзакционная база
+    данных гарантирует, что все изменения, сделанные
+    транзакцией, фиксируются в постоянном хранилище (то есть на
+    диске) до того, как транзакция объявлена завершённой» (3.4);
+    «COMMIT фиксирует текущую транзакцию. Все изменения,
+    сделанные транзакцией, становятся видимыми другим и
+    гарантированно долговечными при сбое»
+    (<a href="https://www.postgresql.org/docs/17/sql-commit.html">/docs/17/sql-commit.html</a>).
+    Механизм — журнал упреждающей записи (WAL): «центральная
+    идея WAL в том, что изменения файлов данных... должны
+    записываться только после того, как эти изменения
+    журналированы, то есть после сброса WAL-записей, описывающих
+    изменения, в постоянное хранилище. Следуя этой процедуре,
+    нам не нужно сбрасывать страницы данных на диск при каждой
+    фиксации транзакции: в случае сбоя мы сможем восстановить
+    базу данных по журналу — все изменения, не применённые к
+    страницам данных, могут быть повторно выполнены из
+    WAL-записей (это восстановление с накатом, также известное
+    как REDO)» — раздел 28.3
+    (<a href="https://www.postgresql.org/docs/17/wal-intro.html">/docs/17/wal-intro.html</a>,
+    перевод дословный). Настройка журнала — тема эксплуатации
+    (middle+), за рамками учебника.</p>
+
+    <h2>Остальные буквы ACID</h2>
+    <p>Согласованность (Consistency) в теории означает, что
+    транзакция переводит базу из одного согласованного состояния в
+    другое, не разрушая ограничений целостности (Silberschatz,
+    гл. 17.1). В учебнике это ограничители из модуля 4: CHECK, NOT
+    NULL, первичные и внешние ключи. Транзакция, нарушающая их,
+    откатывается целиком — поэтому «архив» и «удаление» из
+    примера выше не могут оставить базу наполовину изменённой.
+    Изолированность (Isolation) — «каждая [транзакция] не должна
+    видеть незавершённых изменений, сделанных другими» (3.4) —
+    устроена в PostgreSQL сложно и красиво: версионность строк,
+    уровни изоляции, блокировки; им посвящены главы 6.3–6.6.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Что произойдёт с парой INSERT + DELETE из
+      примера архивации, если сервер аварийно выключится сразу
+      после COMMIT, а что — между INSERT и DELETE?</summary>
+      <p><b>Ответ.</b> После COMMIT — ничего: «все изменения,
+      сделанные транзакцией... гарантированно долговечны при сбое»
+      (sql-commit); их обеспечит WAL-механизм «восстановления с
+      накатом (REDO)» (28.3). Между операторами — транзакция не
+      завершена, при восстановлении она не считается
+      зафиксированной, и «ни один из шагов не затрагивает базу
+      данных» (3.4): ни вставки в архив, ни удаления не остаётся.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему одиночный <code>UPDATE books SET title
+      = &#x27;x&#x27; WHERE book_id = 1;</code> без BEGIN — уже транзакция, и что
+      произойдёт при его падении от ошибки?</summary>
+      <p><b>Ответ.</b> «Если команда BEGIN не выдана, каждый
+      отдельный оператор имеет неявные BEGIN и (в случае успеха)
+      COMMIT, обёрнутые вокруг него» (3.4); в справочнике это режим
+      autocommit: «каждый оператор выполняется в собственной
+      транзакции... иначе выполняется откат» (sql-begin). При
+      ошибке — неявный rollback, изменений нет.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Как WAL обеспечивает долговечность без
+      сброса страниц данных на диск при каждой фиксации?</summary>
+      <p><b>Ответ.</b> «Изменения файлов данных должны записываться
+      только после того, как эти изменения журналированы», то есть
+      после сброса WAL-записей в постоянное хранилище; «в случае
+      сбоя мы сможем восстановить базу данных по журналу — все
+      изменения, не применённые к страницам данных, могут быть
+      повторно выполнены из WAL-записей (REDO)» (28.3). Диск
+      синхронизируется только с журналом, а не со всеми
+      изменёнными страницами.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="05-02-update-delete-returning.html">← Предыдущая: 5.2. UPDATE, DELETE, RETURNING</a>
+      <a class="next" href="06-02-savepoints-errors.html">Следующая: 6.2. Savepoints и обработка ошибок →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/tutorial-transactions.html">Transactions (3.4)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-begin.html">BEGIN</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-commit.html">COMMIT</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-rollback.html">ROLLBACK</a>,
+        <a href="https://www.postgresql.org/docs/17/wal-intro.html">Write-Ahead Logging (28.3)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — гл. 9
+        (транзакции: общая информация).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 17.1 (Transaction Concept, ACID), 17.4 (Atomicity and Durability).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

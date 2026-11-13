@@ -1,0 +1,411 @@
+/* book.css — стили учебника «Интерактивный учебник по PostgreSQL».
+ * Светлая тема, печатабельно, без внешних зависимостей (кроме темы highlight.js
+ * в css/vendor/hl-github.min.css).
+ */
+
+:root {
+  --text: #1f2430;
+  --muted: #5b6472;
+  --accent: #33658a;
+  --accent-dark: #26496b;
+  --bg: #ffffff;
+  --bg-soft: #f5f7fa;
+  --border: #d9dee5;
+  --sidebar-bg: #f8f9fb;
+  --code-bg: #f6f8fa;
+  --ok: #1a7f37;
+  --wrong: #b35900;
+  --hover: #eef2f6;
+  --on-accent: #ffffff;
+  --ok-bg: #e6f4ea;
+  --wrong-bg: #fdf0e0;
+  --badge-j-bg: #e7f0e9;
+  --badge-jp-bg: #f3eadf;
+  --badge-jp-fg: #8a5a00;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  font-family: "PT Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* ---------- верхняя панель и хлебные крошки ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0.45rem 3rem 0.45rem 1rem;
+}
+
+.breadcrumbs {
+  font-size: 0.86rem;
+  color: var(--muted);
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-right: 2.6rem;
+}
+
+.breadcrumbs a { color: var(--accent); text-decoration: none; }
+.breadcrumbs a:hover { text-decoration: underline; }
+
+/* ---------- раскладка: сайдбар + контент ---------- */
+
+.layout {
+  display: flex;
+  gap: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  align-items: flex-start;
+}
+
+.sidebar {
+  flex: 0 0 300px;
+  position: sticky;
+  top: 3.2rem;
+  max-height: calc(100vh - 4rem);
+  overflow-y: auto;
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.sidebar-head { margin-bottom: 0.5rem; }
+.sidebar-head a {
+  font-weight: 700;
+  color: var(--accent-dark);
+  text-decoration: none;
+  font-size: 1rem;
+}
+.sidebar-head a:hover { text-decoration: underline; }
+.sidebar-version {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.nav-module { margin: 0.15rem 0; }
+.nav-module > summary {
+  cursor: pointer;
+  padding: 0.3rem 0.35rem;
+  border-radius: 5px;
+  font-weight: 600;
+  color: var(--accent-dark);
+}
+.nav-module > summary:hover { background: var(--hover); }
+
+.nav-chapters { list-style: none; margin: 0.2rem 0 0.4rem; padding-left: 0.6rem; }
+.nav-chapters li { margin: 0.1rem 0; }
+.nav-chapters a {
+  color: var(--text);
+  text-decoration: none;
+  display: block;
+  padding: 0.15rem 0.4rem;
+  border-radius: 5px;
+}
+.nav-chapters a:hover { background: var(--hover); }
+.nav-chapters li.active a {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.sidebar-foot { color: var(--muted); font-size: 0.78rem; margin: 0.4rem 0 0; }
+.noscript-note { color: var(--muted); }
+
+.content { flex: 1 1 auto; min-width: 0; max-width: 860px; }
+.content-wide { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+
+/* ---------- типографика ---------- */
+
+h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 0.4rem; }
+h2 { font-size: 1.35rem; margin-top: 2.2rem; }
+h3 { font-size: 1.12rem; margin-top: 1.8rem; }
+
+p { margin: 0.7rem 0; }
+
+a { color: var(--accent); }
+
+.chapter-meta { color: var(--muted); font-size: 0.88rem; margin-top: 0; }
+
+code {
+  font-family: "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.08em 0.3em;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.86rem;
+}
+
+/* тема highlight.js задаёт .hljs { background: #fff } —
+ * внутри pre всегда фон контейнера */
+pre code.hljs { background: none; }
+
+/* примеры «вывода psql/EXPLAIN» — не SQL, отдельный стиль */
+pre.sample-output { font-size: 0.82rem; color: var(--muted); }
+
+/* ---------- сворачиваемые блоки ---------- */
+
+details.box,
+details.quiz {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  padding: 0.55rem 0.9rem;
+  margin: 1rem 0;
+}
+
+details.box > summary,
+details.quiz > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--accent-dark);
+}
+
+details.box[open] > summary,
+details.quiz[open] > summary { margin-bottom: 0.4rem; }
+
+details.quiz { border-left: 4px solid var(--accent); }
+
+/* «Проверь себя»: варианты и проверка */
+.quiz label {
+  display: block;
+  padding: 0.25rem 0.4rem;
+  border-radius: 5px;
+}
+.quiz label:hover { background: var(--hover); }
+.quiz label.ok { background: var(--ok-bg); }
+.quiz label.wrong { background: var(--wrong-bg); }
+
+.quiz-check {
+  margin-top: 0.5rem;
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.3rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+.quiz-check:hover { background: var(--accent-dark); }
+
+.quiz-explanation { margin-top: 0.6rem; }
+
+/* ---------- навигация между главами ---------- */
+
+.chapter-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: stretch;
+  gap: 1rem;
+  margin: 2.4rem 0 1.2rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.chapter-nav a {
+  display: inline-block;
+  max-width: 48%;
+  box-sizing: border-box;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--accent-dark);
+  text-decoration: none;
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.chapter-nav a:hover {
+  border-color: var(--accent);
+  background: var(--hover);
+  text-decoration: none;
+}
+
+.chapter-nav a.next { margin-left: auto; }
+
+/* ---------- переключатель темы ---------- */
+
+.theme-toggle {
+  position: absolute;
+  right: 1rem;
+  top: 0.3rem;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.32rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+.theme-toggle:hover { border-color: var(--accent); }
+
+.topbar { position: sticky; }
+
+/* ---------- таблицы ---------- */
+
+table {
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th { background: var(--bg-soft); }
+
+/* ---------- главная страница ---------- */
+
+.module { margin: 2rem 0; }
+.module > h2 { margin-bottom: 0.3rem; }
+.module-desc { color: var(--muted); margin-top: 0; }
+
+.chapter-list { list-style: none; padding-left: 0; }
+.chapter-list li {
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  vertical-align: middle;
+}
+.badge-j { background: var(--badge-j-bg); color: var(--ok); border: 1px solid var(--ok); }
+.badge-jp { background: var(--badge-jp-bg); color: var(--badge-jp-fg); border: 1px solid var(--badge-jp-fg); }
+
+.dag { color: var(--muted); font-size: 0.78rem; margin-left: 0.3rem; }
+
+.legend { background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.9rem; }
+
+.footer { margin-top: 3rem; color: var(--muted); font-size: 0.85rem; }
+
+
+/* ---------- тёмная тема ---------- */
+
+html[data-theme="dark"] {
+  --text: #c9d1d9;
+  --muted: #9199a1;
+  --accent: #58a6ff;
+  --accent-dark: #79c0ff;
+  --bg: #0d1117;
+  --bg-soft: #161b22;
+  --border: #30363d;
+  --sidebar-bg: #161b22;
+  --code-bg: #161b22;
+  --ok: #7ee787;
+  --wrong: #ffa657;
+  --hover: #21262d;
+  --on-accent: #0d1117;
+  --ok-bg: #12261e;
+  --wrong-bg: #2d2113;
+  --badge-j-bg: #12261e;
+  --badge-jp-bg: #2a2113;
+  --badge-jp-fg: #d29922;
+}
+
+/* подсветка синтаксиса: GitHub Dark (палитра highlight.js,
+ * css/vendor/hl-github.min.css — светлая пара) */
+html[data-theme="dark"] .hljs,
+html[data-theme="dark"] pre code { color: #c9d1d9; background: transparent; }
+html[data-theme="dark"] .hljs-doctag,
+html[data-theme="dark"] .hljs-keyword,
+html[data-theme="dark"] .hljs-meta .hljs-keyword,
+html[data-theme="dark"] .hljs-template-tag,
+html[data-theme="dark"] .hljs-template-variable,
+html[data-theme="dark"] .hljs-type,
+html[data-theme="dark"] .hljs-variable.language_ { color: #ff7b72; }
+html[data-theme="dark"] .hljs-title,
+html[data-theme="dark"] .hljs-title.class_,
+html[data-theme="dark"] .hljs-title.class_.inherited__,
+html[data-theme="dark"] .hljs-title.function_ { color: #d2a8ff; }
+html[data-theme="dark"] .hljs-attr,
+html[data-theme="dark"] .hljs-attribute,
+html[data-theme="dark"] .hljs-literal,
+html[data-theme="dark"] .hljs-meta,
+html[data-theme="dark"] .hljs-number,
+html[data-theme="dark"] .hljs-operator,
+html[data-theme="dark"] .hljs-selector-attr,
+html[data-theme="dark"] .hljs-selector-class,
+html[data-theme="dark"] .hljs-selector-id,
+html[data-theme="dark"] .hljs-variable { color: #79c0ff; }
+html[data-theme="dark"] .hljs-meta .hljs-string,
+html[data-theme="dark"] .hljs-regexp,
+html[data-theme="dark"] .hljs-string { color: #a5d6ff; }
+html[data-theme="dark"] .hljs-built_in,
+html[data-theme="dark"] .hljs-symbol { color: #ffa657; }
+html[data-theme="dark"] .hljs-code,
+html[data-theme="dark"] .hljs-comment,
+html[data-theme="dark"] .hljs-formula { color: #8b949e; }
+html[data-theme="dark"] .hljs-name,
+html[data-theme="dark"] .hljs-quote,
+html[data-theme="dark"] .hljs-selector-pseudo,
+html[data-theme="dark"] .hljs-selector-tag { color: #7ee787; }
+html[data-theme="dark"] .hljs-subst { color: #c9d1d9; }
+html[data-theme="dark"] .hljs-section { color: #1f6feb; font-weight: 700; }
+html[data-theme="dark"] .hljs-bullet { color: #f2cc60; }
+html[data-theme="dark"] .hljs-emphasis { color: #c9d1d9; font-style: italic; }
+html[data-theme="dark"] .hljs-strong { color: #c9d1d9; font-weight: 700; }
+
+/* ---------- адаптивность и печать ---------- */
+
+@media (max-width: 960px) {
+  .layout { flex-direction: column; }
+  .sidebar {
+    position: static;
+    max-height: none;
+    flex-basis: auto;
+    width: 100%;
+  }
+}
+
+@media print {
+  .topbar, .sidebar, .quiz-check, .theme-toggle { display: none; }
+  .layout { display: block; }
+  .content { max-width: none; }
+  a { color: inherit; text-decoration: none; }
+}

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 9.2. Статистика планировщика — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="09-02-planner-statistics">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m09">Модуль 9. Планировщик и EXPLAIN</a> /
+    <span aria-current="page">Глава 9.2. Статистика планировщика</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 9.2. Статистика планировщика</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T42 · PostgreSQL 17.11</p>
+
+    <h2>Планировщик угадал — и промахнулся</h2>
+    <p>Запрос «все пятёрки этой книги» внезапно стал медленным.
+    EXPLAIN (глава 8.1) показывает: планировщик оценил узел
+    сканирования в <code>rows=3</code>, а реально вернулось 3 000 строк —
+    и выбранный под 3 строки план захлебнулся. Откуда вообще
+    взялось «3» до выполнения запроса? Планировщик не читает
+    таблицу: он смотрит в заранее собранную статистику. «ANALYZE
+    собирает статистику о содержимом таблиц в базе данных и
+    сохраняет результаты в системном каталоге pg_statistic.
+    Впоследствии планировщик запросов использует эту статистику,
+    чтобы определить самые эффективные планы выполнения для
+    запросов» (ANALYZE,
+    <a href="https://www.postgresql.org/docs/17/sql-analyze.html">/docs/17/sql-analyze.html</a>,
+    перевод дословный). Эта глава — о том, что именно собирает
+    ANALYZE, как из статистики получается оценка числа строк и
+    почему оценка бывает неверной.</p>
+
+    <h2>Первый слой: размер таблицы в pg_class</h2>
+    <p>Вы уже видели этот слой в главе 7.2 — <code>pg_class</code>: «одна
+    из составляющих статистики — общее число записей в каждой
+    таблице и индексе, а также число дисковых блоков, занимаемых
+    каждой таблицей и индексом. Эта информация хранится в
+    таблице pg_class, в столбцах reltuples и relpages» (14.2.1
+    <a href="https://www.postgresql.org/docs/17/planner-stats.html">/docs/17/planner-stats.html</a>,
+    дословно). И оговорка: «по соображениям эффективности
+    reltuples и relpages не обновляются на лету, поэтому обычно
+    содержат несколько устаревшие значения. Они обновляются
+    VACUUM, ANALYZE и несколькими командами DDL, такими как
+    CREATE INDEX» (14.2.1). Отсюда первая причина неверных
+    оценок: таблица выросла после последнего ANALYZE, а
+    <code>reltuples</code> остался старым. Впрочем, перед планированием
+    планировщик «получает фактическое текущее число страниц...
+    и если оно отличается от relpages, reltuples масштабируется
+    соответственно» (68.1
+    <a href="https://www.postgresql.org/docs/17/row-estimation-examples.html">/docs/17/row-estimation-examples.html</a>).</p>
+
+    <h2>Второй слой: pg_statistic и pg_stats</h2>
+    <p>Тонкая структура данных — в каталоге <code>pg_statistic</code>.
+    Сбором управляет <code>do_analyze_rel</code> в
+    <code>src/backend/commands/analyze.c</code> (строка 280 на
+    коммите <code>083ac033419f690758508e08c1736089384bbee8</code>).
+    Каждая запись каталога — про один столбец: уникальный ключ
+    <code>starelid</code> (OID таблицы) + <code>staattnum</code> (номер столбца) +
+    <code>stainherit</code>; дальше <code>stanullfrac</code> — «доля NULL в столбце»,
+    <code>stawidth</code> — «средняя ширина в байтах непустых записей»
+    (пост-TOAST размер!), <code>stadistinct</code> — примерное число
+    различных значений (для уникального столбца −1), а затем
+    четыре «слота» статистики: <code>stakind1..4</code> с кодом вида,
+    <code>staopN</code> с оператором, <code>stanumbersN</code> с числами и <code>stavaluesN</code>
+    со значениями
+    (src/include/catalog/pg_statistic.h, определение каталога
+    со строки 29; интерпретация <code>stadistinct</code> — дословно из
+    комментариев к полям). Смотреть напрямую неудобно и
+    небезопасно: «вместо того чтобы смотреть на pg_statistic
+    напрямую, лучше смотреть на его представление pg_stats...
+    pg_stats доступно для чтения всем, тогда как pg_statistic
+    читается только суперпользователем» (14.2.1). Демонстрация
+    на нашем дневнике:</p>
+
+    <pre><code class="language-sql">ANALYZE reviews;
+
+SELECT n_distinct, most_common_vals, most_common_freqs
+FROM pg_stats
+WHERE tablename = 'reviews' AND attname = 'rating';
+
+EXPLAIN SELECT * FROM reviews WHERE rating = 5;</code></pre>
+
+    <pre class="sample-output">ANALYZE
+ n_distinct | most_common_vals |   most_common_freqs
+------------+------------------+------------------------
+          3 | {5,4,3}          | {0.66667,0.25,0.08333}
+(1 row)
+
+                      QUERY PLAN
+------------------------------------------------------
+ Seq Scan on reviews  (cost=0.00..1.14 rows=8 width=84)
+   Filter: (rating = 5)
+(2 rows)</pre>
+
+    <p>Что выведено и почему (числа у вас будут другими — они
+    зависят от данных): <code>n_distinct</code> — три разных значения
+    рейтинга (восемь пятёрок, три четвёрки и одна тройка —
+    раскладка копилась по главам 2.8, 4.4, 6.3–6.4 и 8.1),
+    MCV-список
+    (most common values) — значения по убыванию частоты, а
+    <code>most_common_freqs</code> — их доли. Оценка <code>rows=8</code> — это ровно
+    «число строк × частота»: 12 × 0.66667. Равенство оценивает
+    функция <code>eqsel</code> — «Selectivity of "=" for any data types»
+    (src/backend/utils/adt/selfuncs.c, строка 228 на базовом
+    коммите): «при оценке равенства гистограмма бесполезна;
+    вместо неё используется список самых частых значений (MCV)
+    для определения селективности» (68.1, дословно).</p>
+
+    <h2>Третий слой: гистограммы для диапазонов</h2>
+    <p>Для «больше/меньше» частых значений мало — нужна гистограмма.
+    Механизм из 68.1 (дословно): «планировщик рассматривает
+    условие WHERE и ищет функцию селективности для оператора &lt;
+    в pg_operator. Она хранится в столбце oprrest, и в данном
+    случае это scalarltsel. Функция scalarltsel извлекает
+    гистограмму... Гистограмма делит диапазон на равные по
+    частоте корзины, так что всё, что нужно сделать — найти
+    корзину, в которой находится наше значение, и учесть её
+    часть и все предыдущие». Учебный пример из 68.1: гистограмма
+    <code>{0,993,1997,3050,4040,5036,5957,7057,8029,9016,9995}</code>
+    по 10 корзинам, условие <code>unique1 &lt; 1000</code> даёт селективность
+    «(1 + (1000 − 993)/(1997 − 993))/10 = 0.100697», а «оценённое
+    число строк... = произведению селективности и кардинальности»:
+    10 000 × 0.100697 ≈ 1007. Так рождается <code>rows</code> в любом плане
+    с диапазонным условием. Качество оценки регулируется: «объём
+    информации, хранимой в pg_statistic командой ANALYZE, в
+    частности максимальное число записей в массивах
+    most_common_vals и histogram_bounds, задаётся для каждого
+    столбца командой ALTER TABLE SET STATISTICS или глобально
+    параметром default_statistics_target. Текущий лимит по
+    умолчанию — 100 записей» (14.2.1).</p>
+
+    <h2>Почему оценка врёт</h2>
+    <p>Три типовые причины. Первая — устаревшая статистика:
+    «reltuples и relpages... обычно содержат несколько устаревшие
+    значения» (14.2.1), а <code>pg_statistic</code> обновляется только
+    ANALYZE. Вторая — случайная выборка: «статистика ANALYZE —
+    случайные выборки, а не точные значения» (14.1, Using
+    EXPLAIN). Третья — коррелированные столбцы: «планировщик
+    обычно предполагает, что несколько условий независимы друг
+    от друга — предположение, которое не выполняется, когда
+    значения столбцов коррелированы. Обычная статистика... не
+    может захватить знание о межстолбцовой корреляции» (14.2.2
+    Extended Statistics; там описаны расширенные статистики —
+    CREATE STATISTICS, но это уже за пределами учебника).
+    Практический вывод для junior-разработчика: увидели в плане
+    дикий <code>rows=</code> рядом с фактическим — первым делом
+    <code>ANALYZE имя_таблицы</code> (автовакуум делает это сам, но не
+    мгновенно).</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Оценка селективности — классика обработки запросов:
+    Silberschatz (7-е изд., гл. 15 Query Processing) в § 15.1
+    Overview описывает оценку числа результирующих кортежей,
+    а § 15.3 Selection Operation — формулы селективности для
+    равенства (s = 1/n_distinct) и диапазона (доля от histograms/
+    min-max). Вы узнали реализацию обоих приёмов: MCV-список —
+    уточнение формулы равенства по фактическим частотам, гистограмма
+    с равными корзинами — § 15.3, но с линейной интерполяцией
+    внутри корзины (68.1). Отличие от «учебниковой» схемы:
+    статистика обновляется асинхронно (ANALYZE), а не ведётся
+    непрерывно. Книга «PostgreSQL 18. Оптимизация запросов»
+    (гл. «Статистика») описывает ту же механику; все утверждения здесь сверены с
+    14.2, 68.1 и кодом на базовом коммите.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Откуда планировщик берёт оценку
+      <code>rows</code> для условия <code>rating = 5</code>, не читая таблицу?</summary>
+      <p><b>Ответ.</b> Из MCV-списка в <code>pg_stats</code>: «при оценке
+      равенства гистограмма бесполезна; вместо неё используется
+      список самых частых значений (MCV)» (68.1). Оценка = reltuples
+      × most_common_freqs[значение]; функцию оценки ведёт <code>eqsel</code>
+      (selfuncs.c, «Selectivity of "=" for any data types»). Если
+      значения нет в MCV — оценка через <code>n_distinct</code>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. В EXPLAIN оценка <code>rows=1007</code>, фактических
+      строк — 40 000, таблица активно росла весь день. Назовите
+      два слоя статистики, которые могли устареть, и что сделать
+      первым делом.</summary>
+      <p><b>Ответ.</b> Слои: <code>pg_class.reltuples</code>/<code>relpages</code> —
+      «обновляются VACUUM, ANALYZE и несколькими командами DDL»
+      (14.2.1), и <code>pg_statistic</code> — обновляется только ANALYZE
+      (sql-analyze). Первое действие — <code>ANALYZE таблица</code> (автовакуум
+      обновляет статистику сам, но по своему расписанию). После
+      ANALYZE оценка пересчитывается из свежих MCV/гистограммы.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему для <code>WHERE created_at BETWEEN
+      &#x27;2026-11-01&#x27; AND &#x27;2026-11-30&#x27;</code> планировщик использует
+      гистограмму, а не MCV-список?</summary>
+      <p><b>Ответ.</b> Диапазон — это оператор <code>&lt;</code>/<code>&gt;</code>: его
+      селективность оценивает «функция... в столбце oprrest...
+      scalarltsel», которая «извлекает гистограмму» (68.1);
+      «гистограмма делит диапазон на равные по частоте корзины».
+      MCV-список перечисляет дискретные частые значения — для
+      диапазона по времени суток и дат он не подходит.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="09-01-query-path.html">← Предыдущая: 9.1. Путь запроса: от текста до результата</a>
+      <a class="next" href="09-03-explain.html">Следующая: 9.3. EXPLAIN: чтение плана →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-analyze.html">ANALYZE</a>,
+        <a href="https://www.postgresql.org/docs/17/planner-stats.html">Statistics Used by the Planner (14.2, 14.2.1, 14.2.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/row-estimation-examples.html">Row Estimation Examples (68.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/using-explain.html">Using EXPLAIN (14.1 — статистика как случайные выборки)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/analyze.c">src/backend/commands/analyze.c</a>
+        (<code>do_analyze_rel</code> L280),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/selfuncs.c">src/backend/utils/adt/selfuncs.c</a>
+        (<code>eqsel</code> L228, комментарий «Selectivity of "=" for any data types» L219–224),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_statistic.h">src/include/catalog/pg_statistic.h</a>
+        (каталог <code>pg_statistic</code> с L29: starelid/staattnum/stanullfrac/stawidth/stadistinct, слоты stakindN/staopN/stanumbersN/stavaluesN).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 15 Query Processing (§ 15.1 Overview; § 15.3 Selection Operation).</li>
+      <li>«PostgreSQL 18. Оптимизация запросов» (Postgres Professional) — гл. «Статистика». Структурная основа; утверждения сверены с документацией 17.11.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

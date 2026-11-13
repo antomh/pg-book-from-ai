@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 6.4. MVCC: версии строк и снимки — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="06-04-mvcc">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m06">Модуль 6. Транзакции и конкурентность</a> /
+    <span aria-current="page">Глава 6.4. MVCC: версии строк и снимки</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 6.4. MVCC: версии строк и снимки</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T30 · PostgreSQL 17.11</p>
+
+    <h2>Почему SELECT не мешает UPDATE, а DELETE не освобождает место</h2>
+    <p>Глава 6.3 оставила два вопроса без механизма. Первый: как
+    «чтение не блокирует запись и запись не блокирует чтение»,
+    если в классике изоляции — блокировках — читатели и писатели
+    одной строки обязаны выстраиваться в очередь? Второй: почему
+    после <code>DELETE</code> место на диске не освобождается (это покажет
+    глава 6.7). Ответ на оба — многоверсионность: PostgreSQL не
+    изменяет строки «на месте», а хранит их версии и решает
+    для каждого оператора, какие версии ему показывать. Документация
+    формулирует модель так: «внутренне согласованность данных
+    поддерживается использованием многоверсионной модели
+    (Multiversion Concurrency Control, MVCC). Это означает, что
+    каждый SQL-оператор видит снимок данных (версию базы данных),
+    каковыми они были некоторое время назад, независимо от
+    текущего состояния лежащих в основе данных. Это предотвращает
+    просмотр операторами несогласованных данных, порождаемых
+    конкурентными транзакциями... Основное преимущество
+    использования MVCC-модели управления конкурентностью вместо
+    блокировок в том, что блокировки, взятые для чтения данных,
+    не конфликтуют с блокировками, взятыми для записи данных, и
+    поэтому чтение никогда не блокирует запись, а запись никогда
+    не блокирует чтение»
+    (<a href="https://www.postgresql.org/docs/17/mvcc-intro.html">/docs/17/mvcc-intro.html</a>,
+    13.1, перевод дословный).</p>
+
+    <h2>Строка — это версии; версия несёт xmin и xmax</h2>
+    <p>Фундаментальный факт — из описания системных столбцов
+    (5.4): «версия строки — это отдельное состояние строки; каждое
+    обновление строки создаёт новую версию строки для того же
+    логического ряда»
+    (<a href="https://www.postgresql.org/docs/17/ddl-system-columns.html">/docs/17/ddl-system-columns.html</a>).
+    Каждая версия несёт служебные столбцы, и два из них — паспорт
+    видимости: <code>xmin</code> — «идентичность (идентификатор транзакции)
+    вставившей транзакции для этой версии строки», <code>xmax</code> —
+    «идентичность (идентификатор транзакции) удаляющей транзакции
+    или ноль для неудалённой версии строки. Возможно, что этот
+    столбец ненулевой в видимой версии строки. Это обычно
+    указывает, что удаляющая транзакция ещё не зафиксирована или
+    что попытка удаления была откачена» (5.4, дословно). В
+    исходном коде это поля заголовка кортежа: структура
+    <code>HeapTupleFields</code> в
+    <code>src/include/access/htup_details.h</code> содержит
+    <code>t_xmin</code> с комментарием «inserting xact ID» (строка 124) и
+    <code>t_xmax</code> — «deleting or locking xact ID» (строка 125); сама
+    структура заголовка <code>HeapTupleHeaderData</code> объявлена на строке
+    153 (коммит
+    <code>083ac033419f690758508e08c1736089384bbee8</code>).
+    <code>UPDATE</code> в терминах кода — функция <code>heap_update</code>
+    (<code>src/backend/access/heap/heapam.c</code>, строка 3346), создающая
+    новую версию; вставка — <code>heap_insert</code> (там же, строка 2108).</p>
+
+    <h2>Идентификатор транзакции — 32-битный счётчик</h2>
+    <p>Что такое «идентификатор транзакции»? Число: <code>typedef
+    uint32 TransactionId;</code> —
+    <code>src/include/c.h</code>, строка 669 на базовом коммите.
+    «Идентификаторы транзакций — 32-битные величины» (5.4), новые
+    выдаёт <code>GetNewTransactionId</code>
+    (<code>src/backend/access/transam/varsup.c</code>, строка 77). 32 бит
+    хватает примерно на 4 миллиарда транзакций, и старение
+    счётчика — отдельная проблема «wraparound» (глава 6.7);
+    внутри системы используется 64-битный <code>FullTransactionId</code>,
+    из которого 32-битный XID извлекается вместе с «эпохой»:
+    макросы <code>EpochFromFullTransactionId</code> и
+    <code>XidFromFullTransactionId</code> в
+    <code>src/include/access/transam.h</code>, строки 47–48.</p>
+
+    <h2>Снимок и правило видимости</h2>
+    <p>Снимок (snapshot) — это и есть «версия базы данных как
+    некоторое время назад». Его структура — <code>SnapshotData</code> в
+    <code>src/include/utils/snapshot.h</code> (строка 142), и
+    комментарии её полей дают полуформальное правило видимости:
+    <code>xmin</code> — «все XID &lt; xmin видимы для меня» (строка 157),
+    <code>xmax</code> — «все XID &gt;= xmax невидимы для меня» (строка 158),
+    а массив <code>xip</code> с счётчиком <code>xcnt</code> (строки 168–169) содержит
+    «все идентификаторы транзакций, которые выполняются [в момент
+    снимка]». Итог в комментарии структуры: «MVCC-снимок никогда
+    не может видеть эффекты XID &gt;= xmax. Он может видеть
+    эффекты всех более старых XID, кроме перечисленных в
+    снимке». Собирая: <b>версия строки видима в снимке, если
+    вставившая её транзакция (xmin) зафиксирована и не входит в
+    снимок как выполняющаяся, а удаляющая транзакция (xmax)
+    отсутствует, ещё выполняется или не зафиксирована
+    к моменту снимка.</b> Проверку выполняет функция
+    <code>HeapTupleSatisfiesMVCC</code> в
+    <code>src/backend/access/heap/heapam_visibility.c</code>
+    (строка 960; файл открывается комментарием «Tuple visibility
+    rules for tuples stored in heap», а функция — «True iff heap
+    tuple is valid for the given MVCC snapshot»). Снимок для
+    оператора выдаёт <code>GetTransactionSnapshot</code>
+    (<code>src/backend/utils/time/snapmgr.c</code>, строка 216), а собирает
+    его из массива активных процессов <code>GetSnapshotData</code>
+    (<code>src/backend/storage/ipc/procarray.c</code>, строка 2177). Связка с
+    главой 6.3: Read Committed берёт снимок на каждый оператор,
+    Repeatable Read — один на транзакцию; разница поведения
+    уровней — это только разница в расписании вызовов
+    <code>GetTransactionSnapshot</code>.</p>
+
+    <h2>Демонстрация: xmin растёт при UPDATE</h2>
+    <p>Системные столбцы можно читать как обычные (вставим строку
+    для опыта; нумерация <code>review_id</code> продолжается после глав
+    6.1–6.3):</p>
+
+    <pre><code class="language-sql">INSERT INTO reviews (review_id, reader_id, book_id, rating, comment)
+VALUES (16, 2, 2, 4, 'для опыта MVCC');
+
+SELECT xmin, xmax, rating FROM reviews WHERE review_id = 16;
+
+UPDATE reviews SET rating = 5 WHERE review_id = 16;
+
+SELECT xmin, xmax, rating FROM reviews WHERE review_id = 16;</code></pre>
+
+    <pre class="sample-output"> xmin | xmax | rating
+------+------+--------
+  745 |    0 |      4
+(1 row)
+
+UPDATE 1
+
+ xmin | xmax | rating
+------+------+--------
+  748 |    0 |      5
+(1 row)</pre>
+
+    <p>Что выведено и почему: конкретные числа зависят от истории
+    кластера (сколько транзакций было до вас), суть — в смене
+    <code>xmin</code>. До UPDATE запрос видел версию с <code>xmin</code> = 745 —
+    идентификатором транзакции, вставившей строку. UPDATE «создал
+    новую версию строки для того же логического ряда» (5.4): у
+    новой версии <code>xmin</code> = 748 — идентификатор самого UPDATE (это
+    была автокоммит-транзакция, глава 6.1). Старая версия с
+    <code>xmin</code> = 745 никуда не делась из файла данных — UPDATE
+    пометил её, проставив ей <code>xmax</code> = 748 (тот же механизм,
+    что и у DELETE, — ниже): именно по этому полю снимок узнаёт,
+    что версия перекрыта; старую версию продолжают видеть только
+    снимки, в которых транзакция 748 ещё не видна; её физическую
+    судьбу разбирает глава 6.7. У новой версии <code>xmax</code> = 0:
+    «ноль для неудалённой версии строки» — новое значение ещё
+    никто не менял.</p>
+
+    <h2>Демонстрация: DELETE в одной сессии не виден другой</h2>
+    <p>Теперь то самое «чтение не блокирует запись». Сессия B
+    удаляет строку 16 в незавершённой транзакции, сессия A читает
+    её же:</p>
+
+    <pre><code class="language-sql">-- сессия B
+BEGIN;
+DELETE FROM reviews WHERE review_id = 16;
+
+-- сессия A (параллельно, любым уровнем изоляции)
+SELECT rating FROM reviews WHERE review_id = 16;
+
+-- сессия B
+COMMIT;
+
+-- сессия A повторяет чтение после фиксации B
+SELECT rating FROM reviews WHERE review_id = 16;</code></pre>
+
+    <pre class="sample-output">DELETE 1
+ rating
+--------
+      5
+(1 row)
+
+COMMIT
+ rating
+--------
+(0 rows)</pre>
+
+    <p>Что выведено и почему: DELETE пометил версию строки:
+    присвоил её <code>xmax</code> идентификатор своей транзакции (роль
+    <code>t_xmax</code> — «deleting or locking xact ID»). Снимок сессии A не
+    видит эту транзакцию среди зафиксированных, поэтому по
+    правилу видимости строка для A на месте — «MVCC-снимок
+    никогда не может видеть эффекты XID &gt;= xmax [снимка]».
+    Никакой блокировки A от B не получила: чтение шло параллельно
+    с удалением. После COMMIT транзакция удаления стала видимой в
+    новых снимках, и повторное чтение A вернуло пусто. Читатель,
+    начавший транзакцию до COMMIT (на Repeatable Read), продолжал
+    бы видеть строку 16 до конца своей транзакции — это снимок на
+    её первый оператор (глава 6.3).</p>
+
+    <h2>Связь с теорией</h2>
+    <p>MVCC PostgreSQL — практическая реализация подхода,
+    описанного в теории БД как изоляция снимков (snapshot
+    isolation): транзакция читает согласованное состояние на
+    момент начала, а конфликты записи разрешаются отдельно
+    (Silberschatz, 7-е изд., § 18.8 Snapshot Isolation).
+    «Каждый SQL-оператор видит снимок данных... независимо от
+    текущего состояния» (13.1) — прямое соответствие теории
+    механизму; отличие от учебниковой схемы — в деталях
+    разрешения конфликтов записи, которые PostgreSQL на уровнях
+    Repeatable Read и Serializable доводит до отката конфликтной
+    транзакции (главы 6.3, 6.5).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В таблице видна строка с xmin = 745 и
+      xmax = 760. Транзакция 760 ещё выполняется. Что видит и что
+      должен сделать оператор с снимком, в котором 760 числится
+      выполняющейся?</summary>
+      <p><b>Ответ.</b> Строка видна: xmin = 745 — вставившая
+      транзакция зафиксирована (она ниже границ снимка), а
+      удаляющая транзакция (xmax = 760) по правилу видимости ещё
+      выполняется — удаление не зафиксировано, и версия видна.
+      Комментарий 5.4: ненулевой xmax в видимой строке «обычно
+      указывает, что удаляющая транзакция ещё не зафиксирована»
+      или откачена. Когда 760 зафиксируется, в новых снимках строка
+      исчезнет.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему после <code>UPDATE reviews SET rating
+      = 5 WHERE review_id = 16</code> размер таблицы не уменьшился, хотя
+      старое значение rating = 4 больше не видно?</summary>
+      <p><b>Ответ.</b> UPDATE «создаёт новую версию строки для
+      того же логического ряда» (5.4; <code>heap_update</code> в heapam.c):
+      старая версия с xmin = 745 осталась в файле данных, просто
+      перекрытая новой. «Чтение никогда не блокирует запись...»
+      (13.1) — и, зеркально, никто не имеет права уничтожить
+      старую версию, пока она может быть нужна «отстающим»
+      снимкам; уборкой мёртвых версий занимается VACUUM (глава
+      6.7).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем снимок Read Committed отличается от
+      снимка Repeatable Read на уровне механизма из этой главы?</summary>
+      <p><b>Ответ.</b> Сам снимок (<code>SnapshotData</code>: xmin, xmax,
+      список xip выполняющихся XID) устроен одинаково; разница —
+      расписание вызовов <code>GetTransactionSnapshot</code> (snapmgr.c): RC
+      берёт свежий снимок «на момент начала выполнения запроса»
+      (13.2.1), RR — один «на момент начала первого оператора...
+      транзакции» (13.2.2) и переиспользует его до COMMIT.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="06-03-isolation-levels.html">← Предыдущая: 6.3. Уровни изоляции и аномалии</a>
+      <a class="next" href="06-05-serializable-ssi.html">Следующая: 6.5. SERIALIZABLE и SSI →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/mvcc-intro.html">Introduction (13.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/transaction-iso.html">Transaction Isolation (13.2.1–13.2.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-system-columns.html">System Columns (5.4: xmin, xmax, ctid)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/access/htup_details.h">src/include/access/htup_details.h</a>
+        (<code>HeapTupleFields</code>: <code>t_xmin</code> L124, <code>t_xmax</code> L125; <code>HeapTupleHeaderData</code> L153),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/c.h">src/include/c.h</a>
+        (<code>typedef uint32 TransactionId</code> L669),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/access/transam.h">src/include/access/transam.h</a>
+        (<code>EpochFromFullTransactionId</code>/<code>XidFromFullTransactionId</code> L47–48),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/utils/snapshot.h">src/include/utils/snapshot.h</a>
+        (<code>SnapshotData</code> L142, <code>xmin</code> L157, <code>xmax</code> L158, <code>xip</code>/<code>xcnt</code> L168–169),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/heap/heapam_visibility.c">src/backend/access/heap/heapam_visibility.c</a>
+        (<code>HeapTupleSatisfiesMVCC</code> L960),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/heap/heapam.c">src/backend/access/heap/heapam.c</a>
+        (<code>heap_insert</code> L2108, <code>heap_update</code> L3346),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/time/snapmgr.c">src/backend/utils/time/snapmgr.c</a>
+        (<code>GetTransactionSnapshot</code> L216),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/storage/ipc/procarray.c">src/backend/storage/ipc/procarray.c</a>
+        (<code>GetSnapshotData</code> L2177),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/access/transam/varsup.c">src/backend/access/transam/varsup.c</a>
+        (<code>GetNewTransactionId</code> L77).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — § 18.8 (Snapshot Isolation).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

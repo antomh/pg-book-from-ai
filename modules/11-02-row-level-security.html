@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 11.2. Row-Level Security — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="11-02-row-level-security">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m11">Модуль 11. Безопасность разработчика</a> /
+    <span aria-current="page">Глава 11.2. Row-Level Security</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 11.2. Row-Level Security</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T51 · PostgreSQL 17.11</p>
+
+    <h2>Фильтр, который забыли написать</h2>
+    <p>В читательском дневнике появилась таблица личных заметок:
+    каждый пишет записи для себя, и все записи лежат в одной
+    таблице. Привилегии из главы 11.1 работают на уровне
+    объекта: <code>GRANT SELECT ON notes TO app_reader</code> открывает
+    <em>всю</em> таблицу. Фильтр «только свои строки» до сих
+    пор писали в приложении: <code>WHERE owner = current_user</code>.
+    В одном из отчётов фильтр забыли — и каждый увидел чужие
+    заметки. Ошибка не в коде одного отчёта, а в архитектуре:
+    правило «каждый видит только свои строки» должно жить в
+    базе, где его нельзя обойти забывчивым SQL. Это и есть
+    Row-Level Security.</p>
+
+    <h2>Политики безопасности строк</h2>
+    <p>Определение из 5.9 Row Security Policies
+    (<a href="https://www.postgresql.org/docs/17/ddl-rowsecurity.html">/docs/17/ddl-rowsecurity.html</a>,
+    перевод дословный): «в дополнение к стандартной SQL системе
+    привилегий, доступной через GRANT, таблицы могут иметь
+    политики безопасности строк, ограничивающие, в расчёте на
+    пользователя, какие строки могут возвращаться обычными
+    запросами или вставляться, обновляться и удаляться
+    командами модификации данных. Эта возможность также
+    известна как Row-Level Security. По умолчанию у таблиц нет
+    никаких политик, так что если пользователь имеет привилегии
+    доступа к таблице согласно системе привилегий SQL, все
+    строки в ней одинаково доступны для запросов или
+    обновлений. Когда row security включена на таблице (с
+    помощью ALTER TABLE ... ENABLE ROW LEVEL SECURITY), весь
+    обычный доступ к таблице для выбора строк или изменения
+    строк должен быть разрешён политикой безопасности строк.
+    (Однако владелец таблицы обычно не подчиняется политикам
+    безопасности строк.) Если для таблицы не существует
+    политик, используется политика запрета по умолчанию
+    (default-deny), означающая, что ни одна строка не видна и
+    не может быть изменена». И важная граница: «операции,
+    применяемые ко всей таблице, такие как TRUNCATE и
+    REFERENCES, не подчиняются row security» — RLS про строки,
+    а не про таблицу.</p>
+    <p>Готовим данные. Две роли-читателя и таблица заметок
+    (роли без LOGIN подключаться не могут, но переключиться
+    на них можно: «текущий пользователь сессии должен иметь
+    опцию SET для указанного role_name... (если пользователь
+    сессии — суперпользователь, может быть выбрана любая
+    роль)» — SET ROLE,
+    <a href="https://www.postgresql.org/docs/17/sql-set-role.html">/docs/17/sql-set-role.html</a>):</p>
+
+    <pre><code class="language-sql">CREATE ROLE alice;
+CREATE ROLE bob;
+
+CREATE TABLE notes (
+    note_id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    owner      text NOT NULL DEFAULT current_user,
+    body       text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO notes (owner, body) VALUES
+    ('alice', 'Перечитать Онегина'),
+    ('bob',   'Не соглашаться на седьмую главу');
+
+GRANT SELECT, INSERT, UPDATE ON notes TO alice, bob;</code></pre>
+
+    <p>Здесь <code>current_user</code> — функция из 9.27, «возвращает
+    имя пользователя текущего контекста исполнения»
+    (<a href="https://www.postgresql.org/docs/17/functions-info.html">/docs/17/functions-info.html</a>).
+    Последний GRANT обязателен: таблицу создал суперпользователь,
+    и без выдачи привилегий (глава 11.1) роли alice и bob
+    получили бы <code>permission denied for table notes</code> ещё до
+    проверок RLS — политики наслаиваются на привилегии, а не
+    заменяют их. Политика и её включение:</p>
+
+    <pre><code class="language-sql">CREATE POLICY notes_isolation ON notes
+    USING (owner = current_user)
+    WITH CHECK (owner = current_user);
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;</code></pre>
+
+    <p>Разбор синтаксиса по CREATE POLICY
+    (<a href="https://www.postgresql.org/docs/17/sql-createpolicy.html">/docs/17/sql-createpolicy.html</a>,
+    далее дословно). Про включение: «обратите внимание, что
+    row-level security должна быть включена на таблице (с
+    помощью ALTER TABLE ... ENABLE ROW LEVEL SECURITY), чтобы
+    созданные политики применялись». Про два выражения:
+    «существующие строки таблицы проверяются против выражения
+    USING, тогда как новые строки, которые будут созданы через
+    INSERT или UPDATE, проверяются против выражения WITH
+    CHECK. Когда выражение USING возвращает true для данной
+    строки, эта строка видна пользователю; если же возвращается
+    false или null, строка не видна. Обычно ошибки при
+    невидимой строке не возникает... Когда выражение WITH CHECK
+    возвращает true для строки, строка вставляется или
+    обновляется; если же false или null — возникает ошибка».
+    Если WITH CHECK не задан, «выражение USING используется и
+    для определения того, какие строки видимы (обычный случай
+    USING), и какие новые строки будут разрешены к добавлению
+    (случай WITH CHECK)». По умолчанию политика применяется ко
+    всем командам и ролям: «по умолчанию для вновь созданных
+    политик — они применяются ко всем командам и ролям, если
+    не указано иное».</p>
+
+    <h2>Проверка изоляции</h2>
+    <pre><code class="language-sql">SET ROLE alice;
+SELECT note_id, owner, body FROM notes;
+
+INSERT INTO notes (owner, body) VALUES ('bob', 'Записка от имени Боба');
+UPDATE notes SET body = 'перехвачено' WHERE owner = 'bob';</code></pre>
+
+    <pre class="sample-output">SET
+ note_id | owner |        body
+---------+-------+---------------------
+       1 | alice | Перечитать Онегина
+(1 row)
+
+ERROR:  new row violates row-level security policy "notes_isolation" for table "notes"
+UPDATE 0</pre>
+
+    <p>Что выведено и почему: после <code>SET ROLE alice</code> функция
+    <code>current_user</code> возвращает <code>alice</code> (9.27), и SELECT показал
+    только её заметку — строка Боба отфильтрована выражением
+    USING без всякой ошибки. INSERT с <code>owner = &#x27;bob&#x27;</code> прошёл
+    проверку WITH CHECK (<code>&#x27;bob&#x27; = &#x27;alice&#x27;</code> — false) и упал с
+    ошибкой «new row violates row-level security policy
+    "notes_isolation" for table "notes"». UPDATE чужой строки
+    молча обновил ноль строк: USING скрыл её ещё до поиска.
+    Точное сообщение ошибки берётся из <code>ExecWithCheckOptions</code>
+    (<code>src/backend/executor/execMain.c</code>, сигнатура —
+    строка 2094; errmsg «new row violates row-level security
+    policy "%s" for table "%s"» — строка 2196 на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>;
+    тот же формат сообщения показывают тесты регрессии,
+    src/test/regress/expected/rowsecurity.out, строки 358–361).</p>
+    <p>Вернуть себе полную роль — <code>RESET ROLE;</code>. И крайний
+    случай для проверки понимания: если на таблице с включённой
+    RLS нет ни одной политики, действует default-deny — «ни
+    одна строка не видна и не может быть изменена» (5.9): не
+    «видно всё», как подсказывает интуиция, а наоборот.</p>
+
+    <h2>Кто обходит политики</h2>
+    <p>Из 5.9 (дословно): «суперпользователи и роли с
+    атрибутом BYPASSRLS всегда обходят систему безопасности
+    строк при доступе к таблице. Владельцы таблиц обычно тоже
+    обходят row security, хотя владелец таблицы может выбрать
+    подчинение политикам row security с помощью ALTER TABLE
+    ... FORCE ROW LEVEL SECURITY. Включение и выключение row
+    security, как и добавление политик к таблице, — всегда
+    привилегия только владельца таблицы». Поэтому в демо мы
+    работали через SET ROLE: таблицей <code>notes</code> владеет создавшая
+    её роль (раздел 5.8 — «владелец — обычно роль, выполнившая
+    оператор создания»), и на него политики не действуют. Политики —
+    диалект PostgreSQL: в стандарте SQL разграничение доступа
+    до строк не определено (в Silberschatz этой темы нет;
+    согласно карте тем модуля тема покрывается документацией
+    PostgreSQL).</p>
+
+    <h2>Как это исполняется</h2>
+    <p>Политики применяются на станции перезаписи запроса —
+    той самой, что раскрывает представления (глава 9.1).
+    В <code>src/backend/rewrite/rewriteHandler.c</code> внутри
+    функции <code>fireRIRrules</code> (строка 2019) для каждой таблицы
+    запроса вызывается <code>get_row_security_policies</code> (строка
+    2246). Сначала решается, применима ли RLS вообще: это
+    делает <code>check_enable_rls</code> — «определить, основываясь на
+    отношении, настройке row_security и текущей роли,
+    применима ли RLS к этому запросу» (комментарий в
+    <code>src/backend/utils/misc/rls.c</code>, функция на
+    строке 52; в PostgreSQL 17 она живёт в этом файле).
+    Затем <code>get_row_security_policies</code>
+    (<code>src/backend/rewrite/rowsecurity.c</code>, строка 98)
+    выбирает подходящие политики (<code>get_policies_for_relation</code>,
+    строка 541) и присоединяет их к запросу двумя способами:
+    <code>add_security_quals</code> (строка 700) превращает выражения
+    USING в условия фильтрации строк, а <code>add_with_check_options</code>
+    (строка 796) — выражения WITH CHECK в проверки новых строк.
+    Первые исполняются как обычные условия при выборке; вторые —
+    в момент модификации: <code>ExecWithCheckOptions</code> вызывается из
+    исполнительного цикла UPDATE/INSERT для каждой новой строки
+    (<code>src/backend/executor/nodeModifyTable.c</code>, строки
+    1018–1019). Отсюда порядок из документации: «для INSERT,
+    UPDATE и MERGE выражения WITH CHECK принудительно
+    применяются после срабатывания BEFORE-триггеров и до любых
+    реальных модификаций данных» (CREATE POLICY) — то, что
+    BEFORE-триггер из главы 10.3 успевает изменить строку до
+    политики. И про видимость: «это выражение вычисляется для
+    каждой строки до любых условий или функций, пришедших из
+    запроса пользователя. (Единственные исключения из этого
+    правила — leakproof-функции, которые гарантированно не
+    протекают информацией; оптимизатор может применить такие
+    функции до проверки row-security)» (5.9) — пометка
+    LEAKPROOF из главы 10.1 защищает и здесь.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Мандатное и дискреционное управление доступом —
+    классификация из теории безопасности баз данных: GRANT/REVOKE
+    из главы 11.1 — дискреционная модель (Silberschatz, 7-е изд.,
+    § 4.7 Authorization). Row-Level Security — средство
+    тонкой настройки той же модели до уровня строк: правило
+    доступа переносится из приложения внутрь СУБД и проверяется
+    при перезаписи каждого запроса. В стандартных учебниках
+    (Silberschatz) эта техника не разбирается — материал главы
+    целиком опирается на документацию PostgreSQL и исходный
+    код; для практики этого достаточно: политика, включение
+    RLS и понимание, где проверка исполняется, — полный
+    junior+-набор.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем USING отличается от WITH CHECK в
+      политике, и что произойдёт, если задать только USING?</summary>
+      <p><b>Ответ.</b> «Существующие строки таблицы проверяются
+      против выражения USING, тогда как новые строки, которые
+      будут созданы через INSERT или UPDATE, проверяются против
+      выражения WITH CHECK» (CREATE POLICY). Невидимая строка
+      (USING = false/null) просто скрыта, а провал WITH CHECK —
+      ошибка. Если WITH CHECK не задан, «выражение USING
+      используется и для определения того, какие строки видимы,
+      и какие новые строки будут разрешены к добавлению»
+      (CREATE POLICY) — в демо это означало бы запрет вставлять
+      чужие заметки тем же условием <code>owner = current_user</code>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. На таблице выполнены ENABLE ROW LEVEL
+      SECURITY и CREATE POLICY ... TO alice. Что увидит роль bob,
+      имеющая GRANT SELECT, и что будет, если политик нет вовсе?</summary>
+      <p><b>Ответ.</b> Роль bob не входит в перечисленные роли
+      политики — применимых к нему политик нет, и действует
+      default-deny: «если политик для таблицы не существует,
+      используется политика запрета по умолчанию, означающая,
+      что ни одна строка не видна и не может быть изменена»
+      (5.9). То же верно и для таблицы с включённой RLS без
+      единой политики: пустой результат, а не «всё видно».
+      Привилегия SELECT из главы 11.1 остаётся необходимой —
+      «весь обычный доступ... должен быть разрешён политикой»
+      поверх неё (5.9).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. На каком этапе обработки запроса
+      применяются политики и какие две конструкции они порождают
+      в запросе?</summary>
+      <p><b>Ответ.</b> На станции перезаписи (глава 9.1):
+    <code>fireRIRrules</code> (rewriteHandler.c L2019) вызывает
+    <code>get_row_security_policies</code> (L2246), применимость решает
+    <code>check_enable_rls</code> (rls.c L52). Политики превращаются в
+    security quals — условия фильтрации строк для USING
+    (<code>add_security_quals</code>, rowsecurity.c L700) — и в with-check
+    options — проверки новых строк для WITH CHECK
+    (<code>add_with_check_options</code>, L796); последние исполняет
+    <code>ExecWithCheckOptions</code> (execMain.c L2094), вызываемый из
+    nodeModifyTable.c (L1018–1019).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="11-01-roles-privileges.html">← Предыдущая: 11.1. Роли, привилегии, владение</a>
+      <a class="next" href="../index.html#m11">Конец модуля. К оглавлению учебника →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/ddl-rowsecurity.html">Row Security Policies (5.9 — определение, default-deny, обход владельцем и BYPASSRLS, TRUNCATE вне RLS, вычисление до условий пользователя, leakproof)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createpolicy.html">CREATE POLICY (USING/WITH CHECK, порядок с BEFORE-триггерами, default для команд и ролей)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-altertable.html">ALTER TABLE (ENABLE / FORCE ROW LEVEL SECURITY)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-info.html">System Information Functions (9.27 — current_user)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-set-role.html">SET ROLE</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/rewrite/rewriteHandler.c">src/backend/rewrite/rewriteHandler.c</a>
+        (<code>fireRIRrules</code> L2019, вызов <code>get_row_security_policies</code> L2246),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/rewrite/rowsecurity.c">src/backend/rewrite/rowsecurity.c</a>
+        (<code>get_row_security_policies</code> L98, <code>get_policies_for_relation</code> L541, <code>add_security_quals</code> L700, <code>add_with_check_options</code> L796),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/misc/rls.c">src/backend/utils/misc/rls.c</a>
+        (<code>check_enable_rls</code> L52),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/execMain.c">src/backend/executor/execMain.c</a>
+        (<code>ExecWithCheckOptions</code> L2094, errmsg «new row violates row-level security policy "%s" for table "%s"» L2196),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeModifyTable.c">src/backend/executor/nodeModifyTable.c</a>
+        (вызов ExecWithCheckOptions L1018–1019),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/test/regress/expected/rowsecurity.out">src/test/regress/expected/rowsecurity.out</a>
+        (формат ошибки RLS, L358–361).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 4 Intermediate SQL, § 4.7 Authorization (с. 165) — контекст: дискреционное управление доступом; RLS в учебнике не покрывается (материал — по документации PostgreSQL, согласно карте тем).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

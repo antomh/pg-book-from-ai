@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 10.4. Процедуры и CALL — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="10-04-procedures-call">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m10">Модуль 10. Серверное программирование</a> /
+    <span aria-current="page">Глава 10.4. Процедуры и CALL</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 10.4. Процедуры и CALL</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T49 · PostgreSQL 17.11</p>
+
+    <h2>Удаление, которое нельзя остановить</h2>
+    <p>Раз в месяц из читательского дневника надо удалять
+    отзывы старше года. Отзывов миллионы, и удалять их одним
+    <code>DELETE</code> нельзя: транзакция вырастет до гигабайт WAL
+    (глава 6.1), заблокирует строки на часы и при откате
+    вернёт всё назад. Нужны циклы: удалить порцию — закрепить —
+    удалить следующую. То есть DELETE... COMMIT... DELETE...
+    COMMIT. В функции так нельзя: «(вы не можете использовать
+    команды управления транзакциями, например COMMIT, SAVEPOINT,
+    и некоторые служебные команды, например VACUUM, в SQL-функциях)»
+    (36.5
+    <a href="https://www.postgresql.org/docs/17/xfunc-sql.html">/docs/17/xfunc-sql.html</a>).
+    Для этого в PostgreSQL есть отдельный объект — процедура
+    (в списке поддерживаемых версий документации CALL самая
+    старая — 11).</p>
+
+    <h2>Процедура: то же, но с транзакциями</h2>
+    <p>Синтаксис зеркален CREATE FUNCTION, но вызов — отдельная
+    команда CALL: «CALL выполняет процедуру» (CALL,
+    <a href="https://www.postgresql.org/docs/17/sql-call.html">/docs/17/sql-call.html</a>).
+    Процедура чистки порциями:</p>
+
+    <pre><code class="language-sql">CREATE PROCEDURE purge_old_reviews(p_days int)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    LOOP
+        DELETE FROM reviews
+        WHERE review_id IN (
+            SELECT review_id
+            FROM reviews
+            WHERE created_at &lt; now() - p_days * interval '1 day'
+            LIMIT 1000
+        );
+        COMMIT;
+        EXIT WHEN NOT FOUND;
+    END LOOP;
+END;
+$$;
+
+CALL purge_old_reviews(365);</code></pre>
+
+    <pre class="sample-output">CALL</pre>
+
+    <p>Что выведено и почему: CALL выполнил процедуру, и psql
+    подтвердил выполнение (таблица <code>reviews</code> в наших главах
+    мала — удалится не более чем всё, что старше года, за один
+    проход цикла). Как это работает: LOOP и <code>EXIT WHEN</code> — из
+    41.6.5 (глава 10.2); подзапрос с <code>LIMIT 1000</code> отбирает
+    порцию строк для удаления; после DELETE переменная FOUND
+    установлена («UPDATE, INSERT, DELETE и MERGE устанавливают
+    FOUND в true, если затронута хотя бы одна строка», 41.5.5),
+    поэтому <code>EXIT WHEN NOT FOUND</code> завершит цикл, когда порции
+    иссякнут. Главное здесь — <code>COMMIT</code> внутри тела: «в
+    процедурах, вызываемых командой CALL, а также в анонимных
+    блоках кода (команда DO), можно завершать транзакции
+    командами COMMIT и ROLLBACK. Новая транзакция запускается
+    автоматически после завершения транзакции этими командами,
+    так что отдельной команды START TRANSACTION нет» (41.8
+    Transaction Management
+    <a href="https://www.postgresql.org/docs/17/plpgsql-transactions.html">/docs/17/plpgsql-transactions.html</a>,
+    перевод дословный). Каждая итерация — короткая транзакция:
+    WAL фиксируется порциями, блокировки не копятся, откат
+    теряет только последнюю порцию.</p>
+
+    <h2>Чем процедура отличается от функции</h2>
+    <p>Сведём различия, каждое — по первоисточнику:</p>
+    <ul>
+      <li><b>Вызов.</b> Функция вызывается в выражениях —
+      <code>SELECT rate_book(...)</code>, в WHERE, в индексных выражениях
+      (глава 8.2). Процедура — только командой CALL: «чтобы
+      вызвать функцию (не процедуру), используйте SELECT»
+      (CALL, Notes). Если написать <code>SELECT
+      purge_old_reviews(365);</code>, сервер отклонит:</li>
+    </ul>
+
+    <pre><code class="language-sql">SELECT purge_old_reviews(365);</code></pre>
+
+    <pre class="sample-output">ERROR:  purge_old_reviews(integer) is a procedure
+LINE 1: SELECT purge_old_reviews(365);
+               ^
+HINT:  To call a procedure, use CALL.</pre>
+
+    <p>Что выведено и почему: разбор выражения в SELECT
+      встретил объект <code>pg_proc</code> с <code>prokind = &#x27;p&#x27;</code> и не-вызов
+      CALL; ошибка формируется в <code>src/backend/parser/parse_func.c</code>:
+      errmsg «%s is a procedure» (строка 297) и errhint «To
+      call a procedure, use CALL.» (строка 301) на коммите
+      <code>083ac033419f690758508e08c1736089384bbee8</code>.</p>
+    <ul>
+      <li><b>Транзакции.</b> Функция всегда исполняется внутри
+      транзакции вызвавшего её оператора (глава 6.1) и «вы
+      не можете использовать команды управления транзакциями...
+      в SQL-функциях» (36.5); PL/pgSQL-функции — то же
+      ограничение: «управление транзакциями возможно только
+      при вызовах CALL или DO с верхнего уровня или во
+      вложенных вызовах CALL или DO без каких-либо промежуточных
+      команд» (41.8). Процедура, вызванная с верхнего уровня,
+      может COMMIT/ROLLBACK (41.8). При этом есть ограничение
+      вызова: «если CALL выполняется в блоке транзакции, то
+      вызванная процедура не может выполнять команды управления
+      транзакциями. Команды управления транзакциями разрешены,
+      только если CALL выполняется в собственной транзакции»
+      (CALL, Notes) — то есть <code>BEGIN; CALL purge_old_reviews(365);
+      ...</code> с COMMIT внутри процедуры не сработает.</li>
+      <li><b>Результат.</b> Функция возвращает значение в
+      выражении (RETURNS, глава 10.1); у процедуры выходных
+      значений в выражении нет — «если процедура имеет выходные
+      параметры, то будет возвращена строка результата,
+      содержащая значения этих параметров» (CALL), не более
+      того. Для массовых операций это и не нужно: результат
+      <code>purge_old_reviews</code> — изменение данных, а не значение.</li>
+    </ul>
+
+    <h2>Как это устроено внутри</h2>
+    <p>Хранение единообразно: и функции, и процедуры — строки
+    каталога <code>pg_proc</code> (глава 10.1), различает колонка prokind:
+    «f» для функции, «p» для процедуры (<code>PROKIND_FUNCTION &#x27;f&#x27;</code>/
+    <code>PROKIND_PROCEDURE &#x27;p&#x27;</code>, pg_proc.h, строки 151 и 154).
+    Даже парсер почти не различает их: грамматика CREATE
+    PROCEDURE строит тот же узел CreateFunctionStmt с флагом
+    <code>is_procedure = true</code> (gram.y, строка 8307; у CREATE
+    FUNCTION флаг ложен — строки 8264, 8278, 8293), а обрабатывает
+    обе команды <code>CreateFunction</code> (functioncmds.c, строка 1011).
+    По-настоящему расходятся пути исполнения: SELECT с
+    функцией уходит в план запроса (глава 9.1), а CALL —
+    служебная команда: в <code>src/backend/tcop/utility.c</code>
+    оператор <code>T_CallStmt</code> (строка 850) вызывает <code>ExecuteCallStmt</code>
+    (строка 851), определённую в functioncmds.c (строка 2188).
+    Ключ к транзакциям — параметр «atomic»: «когда ExecuteCallStmt()
+    вызывается с верхнего уровня, мы передаём atomic = false
+    (напомним: это означает транзакции = да). Затем мы создаём
+    узел CallContext с содержимым atomic = false, который
+    передаётся в поле fcinfo->context вызову процедуры. Реализация
+    языка должна затем принять соответствующие меры, чтобы
+    разрешить или запретить команды транзакций, основываясь
+    на этой информации, например вызвать
+    SPI_connect_ext(SPI_OPT_NONATOMIC)» (комментарий в
+    functioncmds.c, строки 2172–2176, перевод дословный).
+    Именно поэтому COMMIT работает в процедуре с верхнего
+    уровня и запрещён внутри функции: PL/pgSQL проверяет
+    атомарность контекста вызова.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Разделение «функция вычисляется в выражении, процедура
+    вызывается отдельно» — из стандарта SQL и учебников:
+    Silberschatz (7-е изд., гл. 5, § 5.2 Functions and
+    Procedures, с. 198) проводит ту же границу: функции
+    возвращают значение и вызываются в выражениях SQL,
+    процедуры выполняются отдельной командой и нужны для
+    действий. Управление транзакциями внутри процедур в
+    стандарте описано иначе (SQL/PSM), и реализация PostgreSQL
+    через CALL/DO с неатомарным контекстом — диалектное
+    решение. Практический ориентир
+    этой главы: транзакционные batch-операции — процедуре,
+    вычисления — функции, простые запросы — SQL-функции
+    (глава 10.1).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему purge_old_reviews нельзя
+      написать функцией? Что говорит документация о командах
+      управления транзакциями в SQL-функциях?</summary>
+      <p><b>Ответ.</b> Функции исполняются внутри транзакции
+      вызвавшего оператора, и «вы не можете использовать
+      команды управления транзакциями, например COMMIT,
+      SAVEPOINT... в SQL-функциях» (36.5). Порционная чистка
+      требует завершать транзакцию после каждой порции —
+      это умеют только процедуры (и DO): «в процедурах,
+      вызываемых командой CALL... можно завершать транзакции
+      командами COMMIT и ROLLBACK» (41.8).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что произойдёт при <code>BEGIN; CALL
+      purge_old_reviews(365);</code> — и почему тот же вызов без
+      BEGIN работает?</summary>
+      <p><b>Ответ.</b> С явным BEGIN вызов CALL попадает «в
+      блок транзакции», и «вызванная процедура не может
+      выполнять команды управления транзакциями» (CALL,
+      Notes) — COMMIT внутри тела завершится ошибкой. Без
+      BEGIN CALL выполняется «в собственной транзакции»
+      (CALL, Notes): ExecuteCallStmt передаёт atomic = false
+      (functioncmds.c L2172–2176), и PL/pgSQL разрешает
+      COMMIT; новая транзакция стартует автоматически после
+      каждого COMMIT (41.8).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Как сервер отличает процедуру от
+      функции при хранении и при вызове SELECT?</summary>
+      <p><b>Ответ.</b> Хранение общее — каталог <code>pg_proc</code>,
+      различает <code>prokind</code>: 'f' — функция, 'p' — процедура
+      (pg_proc.h L151/L154); CREATE PROCEDURE парсится в тот
+      же CreateFunctionStmt с <code>is_procedure = true</code> (gram.y
+      L8307). При SELECT над процедурой разбор выражения
+      отвергает её: errmsg «%s is a procedure» и errhint
+      «To call a procedure, use CALL.» (parse_func.c L297,
+      L301). CALL же идёт служебным путём: T_CallStmt →
+      <code>ExecuteCallStmt</code> (utility.c L850–851, functioncmds.c
+      L2188).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="10-03-triggers.html">← Предыдущая: 10.3. Триггеры: реакция на изменения</a>
+      <a class="next" href="11-01-roles-privileges.html">Следующий модуль: 11.1. Роли, привилегии, владение →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-createprocedure.html">CREATE PROCEDURE</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-call.html">CALL (в т.ч. Notes: транзакции, EXECUTE, SELECT для функций)</a>,
+        <a href="https://www.postgresql.org/docs/17/plpgsql-transactions.html">Transaction Management (41.8)</a>,
+        <a href="https://www.postgresql.org/docs/17/xfunc-sql.html">Query Language (SQL) Functions (36.5 — запрет транзакционных команд в функциях)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-do.html">DO</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/gram.y">src/backend/parser/gram.y</a>
+        (is_procedure = true L8307, false L8264/L8278/L8293),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/tcop/utility.c">src/backend/tcop/utility.c</a>
+        (case T_CallStmt L850–851),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/functioncmds.c">src/backend/commands/functioncmds.c</a>
+        (<code>CreateFunction</code> L1011, комментарий об atomic/SPI_OPT_NONATOMIC L2172–2176, <code>ExecuteCallStmt</code> L2188),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_proc.h">src/include/catalog/pg_proc.h</a>
+        (PROKIND_FUNCTION 'f' L151, PROKIND_PROCEDURE 'p' L154),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_func.c">src/backend/parser/parse_func.c</a>
+        (errmsg «%s is a procedure» L297, errhint «To call a procedure, use CALL.» L301).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 5 Advanced SQL, § 5.2 Functions and Procedures (с. 198).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

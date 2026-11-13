@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 5.1. INSERT и ON CONFLICT — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="05-01-insert-on-conflict">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m05">Модуль 5. Изменение данных</a> /
+    <span aria-current="page">Глава 5.1. INSERT и ON CONFLICT</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 5.1. INSERT и ON CONFLICT</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T25 · PostgreSQL 17.11</p>
+
+    <h2>Ночная загрузка каталога падает на второй день</h2>
+    <p>Скрипт каждую ночь заливает в <code>books</code> новые книги из внешнего
+    каталога, указывая <code>book_id</code> из каталога. Первая ночь прошла
+    чисто. Вторая оборвалась на первой же существующей книге:
+    вставка нарушает первичный ключ <code>books_pkey</code> (имя ограничения
+    PostgreSQL строит по конвенции «таблица_pkey» — как
+    <code>distributors_pkey</code> в примерах
+    (<a href="https://www.postgresql.org/docs/17/sql-altertable.html">/docs/17/sql-altertable.html</a>)).
+    Пересматривать файл руками — не вариант: каталог приходит
+    целиком. Нужен оператор, который сам решает: новая строка —
+    вставить, существующая — обновить или пропустить. В SQL,
+    «как inserts are performed, one row at a time»
+    (Silberschatz, 7-е изд., § 3.9), конфликты уникальности —
+    штатная ситуация, и PostgreSQL закрывает её предложением
+    <code>ON CONFLICT</code>.</p>
+
+    <h2>INSERT: строки, список столбцов, DEFAULT VALUES</h2>
+    <p>Базовая форма — из главы 6.1
+    (<a href="https://www.postgresql.org/docs/17/dml-insert.html">/docs/17/dml-insert.html</a>):
+    «данные вставляются по одной строке за раз. Можно вставить более
+    одной строки в одной команде, но невозможно вставить что-то,
+    что не является полной строкой». Пропущенные в списке столбцы
+    заполняются значениями по умолчанию (глава 4.1). Документация
+    советует перечислять столбцы явно: «многие пользователи считают
+    хорошей практикой всегда перечислять имена столбцов». Для строки
+    целиком из значений по умолчанию есть форма <code>INSERT INTO t
+    DEFAULT VALUES</code> — «все столбцы будут заполнены значениями по
+    умолчанию, как если бы DEFAULT было явно указано для каждого»
+    (<a href="https://www.postgresql.org/docs/17/sql-insert.html">/docs/17/sql-insert.html</a>,
+    Parameters). Мультивставка и вставка из запроса выглядят так:</p>
+
+    <pre><code class="language-sql">INSERT INTO books (book_id, title, author_id) VALUES
+    (7, 'Ночь перед Рождеством', 2),
+    (8, 'Вий', 2);
+
+INSERT INTO books (book_id, title, author_id)
+SELECT 100 + n, 'Сборник №' || n, 1
+FROM generate_series(1, 3) AS n;</code></pre>
+
+    <p>Обе формы пригодятся в пакетной загрузке ниже. Теперь —
+    конфликтная часть.</p>
+
+    <h2>ON CONFLICT: альтернатива ошибке уникальности</h2>
+    <p>Определение из справочника INSERT дословно: «необязательное
+    предложение ON CONFLICT задаёт альтернативное действие вместо
+    выдачи ошибки нарушения уникального ограничения или ограничения
+    исключения. Для каждой отдельной строки, предлагаемой для
+    вставки, либо выполняется вставка, либо — если нарушен арбитр
+    (ограничение или индекс), указанный конфликтной целью, —
+    выполняется альтернативное конфликтное действие». Действий два:</p>
+    <ul>
+      <li><code>DO NOTHING</code> — «просто не вставляет строку»;</li>
+      <li><code>DO UPDATE</code> — «обновляет существующую строку, которая
+        конфликтует со строкой, предлагаемой для вставки».</li>
+    </ul>
+    <p>Ключевая гарантия: «ON CONFLICT DO UPDATE гарантирует
+    атомарный исход INSERT или UPDATE; при отсутствии независимой
+    ошибки гарантирован один из этих двух исходов, даже при высокой
+    конкурентности. Это также известно как UPSERT — "UPDATE or
+    INSERT"». Идёмпотентная ночная загрузка теперь — один
+    оператор:</p>
+
+    <pre><code class="language-sql">INSERT INTO books (book_id, title, author_id) VALUES
+    (1, 'Евгений Онегин', 1),
+    (11, 'Капитанская дочка', 1)
+ON CONFLICT (book_id) DO UPDATE
+    SET title     = EXCLUDED.title,
+        author_id = EXCLUDED.author_id;</code></pre>
+
+    <pre class="sample-output">INSERT 0 2</pre>
+
+    <p>Что выведено и почему: тег команды <code>INSERT 0 N</code>, где
+    «количество N — это число вставленных или обновлённых строк»
+    (Outputs, sql-insert). Строка с <code>book_id</code> 1 существовала —
+    сработал <code>DO UPDATE</code>, строка с <code>book_id</code> 11 вставлена
+    (новая книга каталога, которой в базе ещё не было); обе
+    посчитаны в N=2. Повторный запуск того же оператора даст тот же
+    результат — загрузка идемпотентна, ошибка <code>books_pkey</code> больше
+    не возникает.</p>
+
+    <h2>excluded и конфликтная цель</h2>
+    <p>В <code>DO UPDATE SET</code> нужны обе стороны: старая строка и
+    предлагаемая. Правило из Parameters (sql-insert): «предложения
+    SET и WHERE в ON CONFLICT DO UPDATE имеют доступ к существующей
+    строке по имени таблицы (или алиасу) и к строке, предлагаемой
+    для вставки, — через специальную таблицу excluded». Поэтому
+    <code>EXCLUDED.title</code> — это заголовок из <code>VALUES</code>, а <code>title</code> —
+    текущее значение в таблице.</p>
+    <p>Конфликтная цель <code>(book_id)</code> — не украшение. Правило вывода
+    (unique index inference): «все уникальные индексы таблицы,
+    которые безотносительно порядка содержат ровно указанные в
+    conflict_target столбцы/выражения, выводятся (выбираются) как
+    арбитровые индексы. Если попытка вывода неуспешна, выдаётся
+    ошибка». Для <code>books</code> арбитром станет B-tree-индекс первичного
+    ключа. Разница между действиями жёсткая: «для ON CONFLICT DO
+    NOTHING указывать конфликтную цель необязательно; когда она
+    опущена, обрабатываются конфликты со всеми пригодными
+    ограничениями (и уникальными индексами). Для ON CONFLICT DO
+    UPDATE конфликтная цель должна быть указана». Вариант «просто
+    не мешать» — без цели:</p>
+
+    <pre><code class="language-sql">INSERT INTO books (book_id, title, author_id) VALUES
+    (2, 'Руслан и Людмила', 1),
+    (9, 'Нос', 2)
+ON CONFLICT DO NOTHING;</code></pre>
+
+    <pre class="sample-output">INSERT 0 1</pre>
+
+    <p>Что выведено и почему: <code>book_id</code> 2 уже существует в таблице —
+    строка пропущена (в идемпотентной загрузке привозят те же
+    данные, что уже лежат в базе), <code>book_id</code> 9 вставлена; N=1. Заметьте: здесь
+    арбитром может стать любой уникальный индекс таблицы, а не
+    только индекс первичного ключа.</p>
+
+    <h2>Как это работает внутри</h2>
+    <p>Почему <code>ON CONFLICT</code> может обещать атомарность без
+    блокировки всей таблицы? Механизм — спекулятивная вставка
+    (speculative insertion). Реализация — в исполнителе
+    модификаций, файл
+    <code>src/backend/executor/nodeModifyTable.c</code> на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>. Строка
+    сначала вставляется в таблицу «под вопросом», с маркером:
+    вызов <code>table_tuple_insert_speculative</code> (строки 1118–1121),
+    затем для неё добавляются записи индексов, и лишь после
+    проверки арбитров окончательный вердикт —
+    <code>table_tuple_complete_speculative</code> (строки 1132–1134).
+    Комментарий в коде объясняет цель: «Before we start insertion
+    proper, acquire our "speculative insertion lock". Others can
+    use that to wait for us to decide if we're going to go ahead
+    with the insertion, instead of waiting for the whole
+    transaction to complete» — конкурент не ждёт конца всей
+    транзакции, а ждёт только решения об этой строке. Если конфликт
+    найден и действие — <code>DO UPDATE</code>, вызывается функция
+    <code>ExecOnConflictUpdate</code> (строка 2544): «Try to lock tuple for
+    update as part of speculative insertion... Returns true if
+    we're done (with or without an update), or false if the
+    caller must retry the INSERT from scratch» — захват
+    конфликтующей строки и её обновление либо повтор вставки.</p>
+
+    <h2>Ловушка мультивставки: «affect row a second time»</h2>
+    <p>Справочник INSERT фиксирует ограничение: «INSERT с
+    предложением ON CONFLICT DO UPDATE — "детерминированный"
+    оператор. Это значит, что команда не сможет воздействовать на
+    одну и ту же существующую строку более одного раза; при
+    возникновении такой ситуации будет выдана ошибка нарушения
+    кардинальности». Поэтому, если в <code>VALUES</code> оказались две строки
+    с одинаковым <code>book_id</code> (дубликат во входном файле), весь
+    оператор упадёт — предочистка дублей по арбитровому столбцу
+    нужна до вставки, например <code>DISTINCT ON (book_id)</code> из
+    главы 2.2.</p>
+
+    <h2>RETURNING: что вставилось</h2>
+    <p>«Необязательное предложение RETURNING заставляет INSERT
+    вычислить и вернуть значения на основе каждой фактически
+    вставленной (или обновлённой, если использовалось ON CONFLICT
+    DO UPDATE) строки. Это прежде всего полезно для получения
+    значений, поставляемых умолчаниями, таких как номер
+    последовательности» (sql-insert). Пример на identity-таблице из
+    главы 4.6 (счётчик последовательности после примеров той главы
+    дошёл до 3):</p>
+
+    <pre><code class="language-sql">INSERT INTO reading_sessions (reader_id, book_id)
+VALUES (2, 4)
+RETURNING session_id, started_at;</code></pre>
+
+    <pre class="sample-output"> session_id |         started_at
+------------+-----------------------------
+          4 | 2026-11-20 10:15:33.172945+03
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>session_id</code> сгенерирован
+    identity-последовательностью (следующий после трёх
+    израсходованных значений — глава 4.6), <code>started_at</code> —
+    умолчанием <code>now()</code> (глава 3.2); оба значения приложение
+    получает без второго запроса.</p>
+
+    <h2>Стандарт SQL и расширение</h2>
+    <p>Раздел Compatibility справочника INSERT прямо отделяет
+    диалект от стандарта: «INSERT соответствует стандарту SQL, за
+    исключением того, что предложение RETURNING является расширением
+    PostgreSQL... как и возможность указывать альтернативное
+    действие с ON CONFLICT». Стандартная альтернатива там же:
+    «если вы предпочитаете более соответствующий стандарту SQL
+    оператор, чем ON CONFLICT, см. MERGE» — и в Notes: «возможно,
+    вы захотите рассмотреть MERGE, поскольку он позволяет
+    смешивать INSERT, UPDATE и DELETE в одном операторе». Для
+    задачи «вставить или обновить по ключу» <code>ON CONFLICT</code>
+    достаточно; <code>MERGE</code> в этом учебнике не разбирается.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем <code>ON CONFLICT DO UPDATE</code> отличается от
+      <code>DO NOTHING</code> по требованиям к конфликтной цели и по результату
+      для существующей строки?</summary>
+      <p><b>Ответ.</b> Для <code>DO UPDATE</code> «конфликтная цель должна быть
+      указана» (по ней выводятся арбитровые индексы), для <code>DO
+      NOTHING</code> цель необязательна — «когда она опущена, обрабатываются
+      конфликты со всеми пригодными ограничениями (и уникальными
+      индексами)» (sql-insert, Parameters). <code>DO NOTHING</code> «просто не
+      вставляет строку», <code>DO UPDATE</code> «обновляет существующую строку,
+      которая конфликтует со строкой, предлагаемой для вставки».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. В <code>ON CONFLICT (book_id) DO UPDATE SET
+      title = EXCLUDED.title</code> — что именно означает <code>EXCLUDED.title</code>
+      и откуда берётся арбитровый индекс для <code>(book_id)</code>?</summary>
+      <p><b>Ответ.</b> <code>EXCLUDED</code> — «специальная таблица», через
+      которую <code>SET</code>/<code>WHERE</code> обращаются к «строке, предлагаемой для
+      вставки», то есть значение из <code>VALUES</code> этого же оператора.
+      Арбитровые индексы — «все уникальные индексы таблицы, которые
+      безотносительно порядка содержат ровно указанные в
+      conflict_target столбцы» (unique index inference); здесь это
+      индекс первичного ключа <code>books_pkey</code>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему <code>INSERT ... VALUES (1, ...), (1,
+      ...) ON CONFLICT (book_id) DO UPDATE</code> завершится ошибкой, и
+      что помогает избежать её при пакетной загрузке?</summary>
+      <p><b>Ответ.</b> Оператор «не сможет воздействовать на одну и
+      ту же существующую строку более одного раза; при возникновении
+      такой ситуации будет выдана ошибка нарушения кардинальности»
+      (sql-insert): две строки VALUES претендуют на один <code>book_id</code>.
+      Помогает дедупликация входных данных — например, <code>DISTINCT
+      ON (book_id)</code> из главы 2.2 до вставки.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="04-07-partitioning.html">← Предыдущая: 4.7. Декларативное партиционирование</a>
+      <a class="next" href="05-02-update-delete-returning.html">Следующая: 5.2. UPDATE, DELETE, RETURNING →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-insert.html">INSERT (Description, ON CONFLICT Clause, Parameters, Outputs, Notes, Compatibility)</a>,
+        <a href="https://www.postgresql.org/docs/17/dml-insert.html">Inserting Data (6.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-altertable.html">ALTER TABLE (пример имени distributors_pkey)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/executor/nodeModifyTable.c">src/backend/executor/nodeModifyTable.c</a>
+        (функции <code>ExecOnConflictUpdate</code> — L2544, вызовы
+        <code>table_tuple_insert_speculative</code>/<code>table_tuple_complete_speculative</code>
+        — L1118, L1132).</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 7.1
+        (вставка строк в таблицы).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — § 3.9 (Modification of the Database).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

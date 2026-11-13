@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.2. Сортировка, LIMIT/OFFSET, DISTINCT — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-02-order-limit-distinct">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.2. Сортировка, LIMIT/OFFSET, DISTINCT</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.2. Сортировка, LIMIT/OFFSET, DISTINCT</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T05 · PostgreSQL 17.11</p>
+
+    <h2>«Топ-3 книги» работает через раз</h2>
+    <p>Задача: вывести три лучшие книги по рейтингу. Первая попытка
+    обычно такая:</p>
+
+    <pre><code class="language-sql">SELECT title, rating FROM books LIMIT 3;</code></pre>
+
+    <p>Запрос возвращает три строки — но это «какие-то» три строки, а не
+    лучшие. Разработчик добавляет сортировку, получает рабочий вариант,
+    а затем на продакшене сталкивается со вторым сюрпризом: пагинация
+    (LIMIT + OFFSET) выдаёт повторяющиеся или пропадающие строки. Оба
+    сюрприза — не баги PostgreSQL, а следствие одного правила, которое
+    эта глава фиксирует: <b>без ORDER BY порядок строк не определён, и
+    любые «первые N» — случайность</b>.</p>
+
+    <h2>ORDER BY: единственный способ гарантировать порядок</h2>
+    <p>Документация формулирует жёстко: «если сортировка не выбрана,
+    строки возвращаются в неопределённом порядке. Фактический порядок в
+    этом случае зависит от планов сканирования и соединения и порядка на
+    диске, но полагаться на него нельзя. Конкретный порядок вывода
+    гарантируется, только если шаг сортировки выбран явно» (раздел 7.5
+    Sorting Rows,
+    <a href="https://www.postgresql.org/docs/17/queries-order.html">/docs/17/queries-order.html</a>).
+    Справочная страница SELECT повторяет: «если ORDER BY не задан,
+    строки возвращаются в том порядке, который системе дешевле всего
+    произвести»
+    (<a href="https://www.postgresql.org/docs/17/sql-select.html">/docs/17/sql-select.html</a>).</p>
+    <p>Правильный запрос на «топ-3»:</p>
+
+    <pre><code class="language-sql">SELECT title, rating
+FROM books
+ORDER BY rating DESC NULLS LAST
+LIMIT 3;</code></pre>
+
+    <pre class="sample-output">     title      | rating
+---------------+--------
+ Евгений Онегин|      5
+ Война и мир   |      5
+ Мёртвые души  |      4
+(3 rows)</pre>
+
+    <p>Что выведено и почему: строки отсортированы по <code>rating</code> по
+    убыванию (<code>DESC</code>); <code>LIMIT 3</code> оставляет первые три из
+    отсортированного результата. Зачем здесь <code>NULLS LAST</code>: без него
+    «топ-3» возглавила бы «Анна Каренина» с отсутствующей оценкой —
+    NULL в сортировке «больше любого не-NULL-значения», и для DESC
+    действует NULLS FIRST; правило разобрано ниже, в разделе «Где NULL
+    в сортировке». Тонкость: «Евгений Онегин» и «Война и
+    мир» равны по рейтингу — кто из них первым, решает уже не этот
+    ORDER BY: «если две строки равны по всем указанным выражениям, они
+    возвращаются в порядке, зависящем от реализации» (раздел ORDER BY
+    Clause справочника SELECT). Для полной детерминированности добавляют
+    третий ключ сортировки, например <code>ORDER BY rating DESC NULLS LAST,
+    book_id</code>.</p>
+
+    <h3>Где NULL в сортировке</h3>
+    <p>У_NULL_в ORDER BY есть отдельное правило: «по умолчанию NULL
+    сортируется так, будто он больше любого не-NULL-значения; то есть
+    NULLS FIRST — значение по умолчанию для DESC, а NULLS LAST — иначе»
+    (раздел 7.5,
+    <a href="https://www.postgresql.org/docs/17/queries-order.html">/docs/17/queries-order.html</a>).
+    На наших данных:</p>
+
+    <pre><code class="language-sql">SELECT title, rating FROM books ORDER BY rating DESC;</code></pre>
+
+    <pre class="sample-output">      title       | rating
+------------------+--------
+ Анна Каренина    |
+ Евгений Онегин  |      5
+ Война и мир     |      5
+ Мёртвые души     |      4
+ Руслан и Людмила |      4
+ Детектив XXI века|      3
+(6 rows)</pre>
+
+    <p>Что выведено и почему: «Анна Каренина» без рейтинга оказалась
+    первой — при DESC «NULL больше всего» и NULLS FIRST применяется
+    автоматически. Хотите управлять этим явно — пишите
+    <code>ORDER BY rating DESC NULLS LAST</code> (синтаксис <code>NULLS FIRST/LAST</code>
+    документирован там же).</p>
+
+    <h3>Сортировать можно выражениями и алиасами</h3>
+    <p>«Выражения сортировки могут быть любыми выражениями, допустимыми
+    в списке выборки запроса» — пример из документации:
+    <code>ORDER BY a + b, c</code> (раздел 7.5). Кроме того, «каждое выражение
+    [ORDER BY] может быть именем или порядковым номером выходного
+    столбца (элемента списка SELECT) либо произвольным выражением из
+    значений входных столбцов» (ORDER BY Clause справочника
+    <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT</a>).
+    Отсюда удобный шаблон — сортировать по алиасу из списка выборки:</p>
+
+    <pre><code class="language-sql">SELECT title, 2026 - year AS age_years
+FROM books
+ORDER BY age_years;</code></pre>
+
+    <h2>LIMIT и OFFSET: порции результата</h2>
+    <p>«LIMIT и OFFSET позволяют получить только часть строк,
+    порождаемых остальной частью запроса... Если задан предел, будет
+    возвращено не больше этого числа строк (но, возможно, меньше, если
+    сам запрос даёт меньше строк). LIMIT ALL равнозначен отсутствию
+    LIMIT, как и LIMIT с аргументом NULL. OFFSET означает пропуск
+    указанного числа строк до начала возврата» (раздел 7.6 LIMIT and
+    OFFSET,
+    <a href="https://www.postgresql.org/docs/17/queries-limit.html">/docs/17/queries-limit.html</a>).</p>
+    <p>Почему LIMIT без ORDER BY — лотерея, документация объясняет
+    прямо: «используя LIMIT, важно применять ORDER BY, который задаёт
+    строкам уникальный порядок. Иначе вы получите непредсказуемое
+    подмножество строк запроса. Вы можете просить строки с десятой по
+    двадцатую — но десятые по двадцатые в каком порядке? Порядок
+    неизвестен, если вы не указали ORDER BY. Оптимизатор запросов
+    учитывает LIMIT при генерации планов, поэтому разные значения
+    LIMIT/OFFSET с большой вероятностью дадут разные планы (и разный
+    порядок строк). Выбор разных порций одного результата через разные
+    LIMIT/OFFSET даст несогласованные результаты, если не обеспечить
+    предсказуемый порядок через ORDER BY» (там же).</p>
+
+    <details class="box">
+      <summary>Стандарт SQL: FETCH FIRST вместо LIMIT</summary>
+      <p>«SQL:2008 ввёл другой синтаксис для того же результата, который
+      PostgreSQL тоже поддерживает» —
+      <code>OFFSET start { ROW | ROWS } FETCH { FIRST | NEXT } [ count ]
+      { ROW | ROWS } { ONLY | WITH TIES }</code>. В стандарте <code>start</code> и
+      <code>count</code> обязаны быть литеральной константой, параметром или именем
+      переменной; «как расширение PostgreSQL допускаются другие
+      выражения, но обычно их нужно заключать в скобки». Формулировки —
+      справочная страница
+      <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT</a>,
+      раздел LIMIT Clause. То есть <code>LIMIT 3</code> — удобная запись
+      PostgreSQL; <code>FETCH FIRST 3 ROWS ONLY</code> — стандартная. Прочие
+      свойства: <code>FETCH ... WITH TIES</code> возвращает также строки, равные
+      последней по ORDER BY (ORDER BY при этом обязателен).</p>
+    </details>
+
+    <h2>DISTINCT и DISTINCT ON</h2>
+    <p><code>DISTINCT</code> убирает полные дубликаты строк результата (раздел
+    7.3.3,
+    <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>;
+    напомним из главы 1.1: SQL-выдача без DISTINCT — мультимножество).
+    Пример из главы 1.1: <code>SELECT DISTINCT author_id FROM books</code> вернул
+    множество авторов, включая NULL:</p>
+
+    <pre><code class="language-sql">SELECT DISTINCT author_id FROM books ORDER BY author_id;</code></pre>
+
+    <pre class="sample-output"> author_id
+-----------
+         1
+         2
+         3
+
+(4 rows)</pre>
+
+    <p>Что выведено и почему: четыре строки при шести книгах — Пушкин и
+    Толстой встречаются дважды и сворачиваются в одну строку каждая;
+    отдельной строкой остаётся NULL (два NULL считаются дубликатами
+    при DISTINCT — «Null values are considered equal in this
+    comparison» — раздел 7.3.3 там же). Пустая ячейка между «3» и
+    «(4 rows)» — это и есть строка NULL: psql рисует отсутствующее
+    значение пустым местом, и её легко не заметить; NULL идёт
+    последним при возрастающей сортировке — NULLS LAST по умолчанию,
+    раздел «Где NULL в сортировке» выше. Строк стало меньше, чем книг, потому что
+    DISTINCT сворачивает полные дубликаты — то есть превращает
+    мультимножество в множество, как обсуждалось в главе 1.1.</p>
+    <p>Расширение PostgreSQL — <code>DISTINCT ON (выражение, ...)</code>: «множество
+    строк, у которых все выражения равны, считаются дубликатами, и в
+    выводе остаётся только первая строка множества». При этом «"первая
+    строка" множества непредсказуема, если запрос не отсортирован по
+    достаточному числу столбцов, гарантирующему уникальный порядок
+    строк, приходящих на фильтр DISTINCT. (Обработка DISTINCT ON
+    происходит после сортировки ORDER BY.)» — раздел 7.3.3,
+    <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>.
+    Типовой шаблон «одна строка на автора — его лучшая книга»:</p>
+
+    <pre><code class="language-sql">SELECT DISTINCT ON (author_id) author_id, title, rating
+FROM books
+ORDER BY author_id, rating DESC;</code></pre>
+
+    <pre class="sample-output"> author_id |      title       | rating
+-----------+------------------+--------
+         1 | Евгений Онегин  |      5
+         2 | Мёртвые души     |      4
+         3 | Война и мир     |      5
+           | Детектив XXI века|      3
+(4 rows)</pre>
+
+    <p>Что выведено и почему: сортировка внутри <code>author_id</code> по рейтингу
+    по убыванию расставила книги автора; DISTINCT ON оставил первую
+    строку каждой группы. Групп четыре, а не три: NULL тоже образует
+    свою группу — «два NULL считаются равными» и в DISTINCT ON, — и
+    «Детектив XXI века» (пустая ячейка <code>author_id</code> в последней
+    строке) возглавляет её: при возрастающей сортировке по
+    <code>author_id</code> NULL-группа идёт последней (NULLS LAST, раздел
+    выше). Убейте вторую часть сортировки (<code>rating
+    DESC</code>) — «первая» строка автора станет непредсказуемой. Документация
+    предупреждает и об этом, и о том, что «DISTINCT ON не является
+    частью стандарта SQL и иногда считается плохим стилем из-за
+    потенциально недетерминированного характера результатов; при
+    аккуратном использовании GROUP BY и подзапросов в FROM этой
+    конструкции можно избежать» (там же) — эквивалентный способ
+    появится в главе 2.5.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. На тестовых данных <code>SELECT title FROM books LIMIT
+      3</code> вернул одни и те же строки десять раз подряд. Значит ли это,
+      что порядок стабилен?</summary>
+      <p><b>Ответ.</b> Нет. Без ORDER BY порядок не определён
+      («строки возвращаются в неопределённом порядке... полагаться
+      нельзя» — 7.5) и может меняться при смене плана, объёма данных,
+      настроек, параллельности. Повторяемость в одной серии запусков —
+      не гарантия. Ссылки: разделы 7.5
+      <a href="https://www.postgresql.org/docs/17/queries-order.html">queries-order.html</a>
+      и 7.6
+      <a href="https://www.postgresql.org/docs/17/queries-limit.html">queries-limit.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Куда попадёт книга с rating = NULL при
+      <code>ORDER BY rating</code> и при <code>ORDER BY rating DESC</code>? Как вынести
+      NULL-строки в конец при убывающей сортировке?</summary>
+      <p><b>Ответ.</b> По умолчанию NULL «больше любого не-NULL»: при
+      возрастающей сортировке NULL уходит в конец (эквивалент NULLS
+      LAST), при убывающей — в начало (эквивалент NULLS FIRST). Явно
+      управлять положением можно опциями NULLS FIRST/NULLS LAST:
+      <code>ORDER BY rating DESC NULLS LAST</code> (7.5,
+      <a href="https://www.postgresql.org/docs/17/queries-order.html">/docs/17/queries-order.html</a>).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем DISTINCT ON отличается от GROUP BY и почему
+      его результат может «плавать»?</summary>
+      <p><b>Ответ.</b> DISTINCT ON оставляет первую строку каждого
+      множества строк с равными значениями выражений; какая строка
+      «первая», решает сортировка — поэтому без ORDER BY, делающего
+      порядок уникальным, результат непредсказуем (обработка DISTINCT
+      ON идёт после ORDER BY). GROUP BY сворачивает каждую группу в
+      одну строку детерминированно, но требует агрегатов для прочих
+      столбцов. DISTINCT ON — расширение PostgreSQL, не входящее в
+      стандарт SQL (7.3.3,
+      <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">/docs/17/queries-select-lists.html</a>).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-01-select-where-null.html">← Предыдущая: 2.1. SELECT: проекция, WHERE, NULL и трёхзначная логика</a>
+      <a class="next" href="02-03-joins.html">Следующая: 2.3. Соединения JOIN →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/queries-order.html">Sorting Rows (7.5)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-limit.html">LIMIT and OFFSET (7.6)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-select-lists.html">Select Lists / DISTINCT (7.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference: ORDER BY, LIMIT, Compatibility)</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

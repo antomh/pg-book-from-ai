@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.1. Числовые и строковые типы — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-01-numeric-text-types">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.1. Числовые и строковые типы</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.1. Числовые и строковые типы</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T12 · PostgreSQL 17.11</p>
+
+    <h2>Бухгалтерский отчёт теряет копейки</h2>
+    <p>Классика производственных историй: цены хранят в столбце типа
+    double precision, отчёт по чеку из тысячи позиций расходится с суммой
+    позиций на несколько копеек, и это не ошибка кода, а свойство типа.
+    Другая история: год издания книги записали как <code>integer</code>, а
+    идентификатор внешней системы — как <code>smallint</code>, и однажды вставка
+    падает с ошибкой. Обе истории — о выборе типа столбца, и этот выбор
+    делается один раз, при проектировании. В этой главе — числовые
+    типы PostgreSQL (целые, точные, приближённые) и строковые
+    (<code>char</code>, <code>varchar</code>, <code>text</code>): что именно обещает каждый тип и где
+    границы.</p>
+
+    <h2>Целые типы: маленький, обычный, большой</h2>
+    <p>Раздел 8.1.1 документации
+    (<a href="https://www.postgresql.org/docs/17/datatype-numeric.html">/docs/17/datatype-numeric.html</a>)
+    приводит три целых типа (таблица 8.2, дословно в переводе):</p>
+    <table>
+      <thead><tr><th>Тип</th><th>Хранение</th><th>Описание</th><th>Диапазон</th></tr></thead>
+      <tbody>
+        <tr><td>smallint</td><td>2 байта</td><td>малый диапазон</td><td>от -32768 до +32767</td></tr>
+        <tr><td>integer</td><td>4 байта</td><td>типичный выбор</td><td>от -2147483648 до +2147483647</td></tr>
+        <tr><td>bigint</td><td>8 байт</td><td>большой диапазон</td><td>от -9223372036854775808 до +9223372036854775807</td></tr>
+      </tbody>
+    </table>
+    <p>Переполнение — ошибка, а не «молчаливое заворачивание», как в C.
+    Сложение двух <code>integer</code> реализовано серверной функцией <code>int4pl</code> в
+    файле
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/int.c#L829">src/backend/utils/adt/int.c,
+    строка 829</a> на базовом коммите: она проверяет результат через
+    <code>pg_add_s32_overflow</code> и при переполнении выдаёт <code>errmsg(&quot;integer out
+    of range&quot;)</code>. Проверяем:</p>
+
+    <pre><code class="language-sql">SELECT 2147483647 + 1;</code></pre>
+
+    <pre class="sample-output">ERROR:  integer out of range</pre>
+
+    <p>Вторая история из вводки — про <code>smallint</code>: вставка значения
+    40&nbsp;000 в двухбайтовый столбец упадёт той же ошибкой, потому что
+    32&nbsp;767 — потолок диапазона; проверяется это ещё на приведении
+    значения к типу:</p>
+
+    <pre><code class="language-sql">SELECT 40000::smallint;</code></pre>
+
+    <pre class="sample-output">ERROR:  smallint out of range</pre>
+
+    <details class="box">
+      <summary>Замечание: serial и identity</summary>
+      <p>Для автоинкрементных столбцов PostgreSQL предлагает типы
+      <code>serial</code>/<code>bigserial</code>, но документация прямо помечает их как
+      специфичный для PostgreSQL способ: «в этом разделе описан
+      специфичный для PostgreSQL способ создать автоинкрементный
+      столбец. Другой способ — стандартная для SQL колонка identity
+      (см. раздел 5.3)» (примечание к 8.1.4 Serial Types там же).
+      Столбцы identity (<code>GENERATED ... AS IDENTITY</code>) описаны в главе
+      4.1 этого учебника.</p>
+    </details>
+
+    <h2>numeric: точная арифметика с заданной точностью</h2>
+    <p>Тип <code>numeric</code> — «выбираемая точность, точный: до 131072 цифр до
+    десятичной точки; до 16383 цифр после» (таблица 8.2). Два факта
+    из раздела 8.1.2:</p>
+    <ul>
+      <li>«Типы decimal и numeric эквивалентны. Оба типа — часть
+        стандарта SQL»;</li>
+      <li>«При округлении numeric округляет ties от нуля (away from
+        zero), тогда как (на большинстве машин) real и double precision
+        округляют ties к ближайшему чётному».</li>
+    </ul>
+    <p>Точность задаётся как <code>numeric(точность, масштаб)</code>, где масштаб —
+    число цифр после точки. Правило из 8.1.2: «если масштаб сохраняемого
+    значения больше заявленного масштаба столбца, система округлит
+    значение до указанного числа дробных цифр. Затем, если число цифр
+    слева от десятичной точки превышает заявленную точность минус
+    заявленный масштаб, возникает ошибка. Например, столбец, объявленный
+    NUMERIC(3, 1), округляет значения до 1 знака после точки и хранит
+    значения от -99.9 до 99.9 включительно». Добавим в учебный проект
+    таблицу изданий:</p>
+
+    <pre><code class="language-sql">CREATE TABLE editions (
+    edition_id integer PRIMARY KEY,
+    book_id    integer REFERENCES books (book_id),
+    format     varchar(10),
+    price      numeric(6,2)
+);
+
+INSERT INTO editions VALUES
+    (1, 1, 'hardcover', 1200.00),
+    (2, 1, 'paperback',  450.50),
+    (3, 2, 'paperback',  380.00),
+    (4, 3, 'paperback',   12.345);</code></pre>
+
+    <p>Последняя строка вставится: дробной части 12.345 — три знака, а
+    масштаб столбца 2, поэтому значение округлится:</p>
+
+    <pre><code class="language-sql">SELECT edition_id, price FROM editions ORDER BY edition_id;</code></pre>
+
+    <pre class="sample-output"> edition_id |  price
+------------+---------
+          1 | 1200.00
+          2 |  450.50
+          3 |  380.00
+          4 |   12.35
+(4 rows)</pre>
+
+    <p>Что выведено и почему: <code>12.345</code> округлено до <code>12.35</code> — по
+    правилу «ties away from zero» (5 округляет вверх по модулю);
+    остальные значения сохранили два знака. Отсюда и рекомендация
+    <b>хранить деньги в numeric</b>: центы и копейки не теряются ни при
+    хранении, ни при сложении — арифметика точная, а не приближённая.</p>
+
+    <h2>real и double precision: быстрые, но приближённые</h2>
+    <p>«Типы real и double precision — неточные, переменной точности
+    числовые типы. На всех поддерживаемых сейчас платформах эти типы
+    реализуют IEEE Standard 754 для двоичной арифметики с плавающей
+    точкой» — раздел 8.1.3. Точности: «6 десятичных цифр» у real (4
+    байта) и «15 десятичных цифр» у double precision (8 байт), «неточный
+    означает, что некоторые значения нельзя преобразовать во внутренний
+    формат точно, и они хранятся как ближайшее приближение» (там же,
+    таблица 8.2 и 8.1.3). Практическое следствие:</p>
+
+    <pre><code class="language-sql">SELECT 0.1::numeric   + 0.2::numeric   = 0.3::numeric   AS numeric_eq,
+       0.1::double precision + 0.2::double precision = 0.3::double precision AS double_eq;</code></pre>
+
+    <pre class="sample-output"> numeric_eq | double_eq
+------------+-----------
+ t          | f
+(1 row)</pre>
+
+    <p>Что выведено и почему: 0.1, 0.2 и 0.3 не представимы конечной
+    двоичной дробью, и в double precision каждое из них хранится
+    ближайшим приближением; сумма приближений 0.1 и 0.2 — не то же
+    приближение, что у 0.3, поэтому равенство ложно. В numeric значение
+    хранится точно (десятичная арифметика), и равенство истинно. Это не
+    «баг» — свойство IEEE 754, общее для большинства языков
+    программирования.</p>
+    <p>Разница в правилах округления ties — дословный пример из
+    документации (8.1.2), сравнивающий поведение numeric и double
+    precision на половинных значениях:</p>
+
+    <pre><code class="language-sql">SELECT x, round(x::numeric) AS num_round,
+       round(x::double precision) AS dbl_round
+FROM generate_series(-3.5, 3.5, 1) AS x;</code></pre>
+
+    <pre class="sample-output">  x   | num_round | dbl_round
+------+-----------+-----------
+ -3.5 |        -4 |        -4
+ -2.5 |        -3 |        -2
+ -1.5 |        -2 |        -2
+ -0.5 |        -1 |        -0
+  0.5 |         1 |         0
+  1.5 |         2 |         2
+  2.5 |         3 |         2
+  3.5 |         4 |         4
+(8 rows)</pre>
+
+    <p>Что выведено и почему: numeric округляет 0.5-случаи от нуля
+    (2.5 → 3), double precision — к ближайшему чётному (2.5 → 2);
+    оба ряда стабильны, но различны. Когда округление видит
+    пользователь денег — это важно.</p>
+
+    <h2>char, varchar, text</h2>
+    <p>Раздел 8.3 Character Types
+    (<a href="https://www.postgresql.org/docs/17/datatype-character.html">/docs/17/datatype-character.html</a>):
+    «SQL определяет два основных строковых типа: character varying(n) и
+    character(n), где n — положительное целое. Оба могут хранить строки
+    до <b>n символов (не байт)</b>. Попытка сохранить более длинную
+    строку приведёт к ошибке, если только лишние символы не пробелы —
+    тогда строка усекается до максимальной длины... Однако при явном
+    приведении значения к character varying(n) или character(n)
+    сверхлимитное значение усекается до n символов без ошибки (это
+    тоже требуется стандартом SQL). Если сохраняемая строка короче
+    заявленной длины, значения типа character дополняются пробелами
+    (space-padded); character varying просто хранит короткую строку.
+    Кроме того, PostgreSQL предоставляет тип text, который хранит
+    строки любой длины. Хотя тип text не входит в стандарт SQL, он есть
+    и в ряде других СУБД; text — родной строковый тип PostgreSQL
+    (PostgreSQL's native string data type)».</p>
+    <p>Ошибка при переполнении — родом из кода сервера:
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/varchar.c#L475">src/backend/utils/adt/varchar.c,
+    строка 475</a> (базовый коммит): при вставке в <code>character
+    varying(n)</code> сервер выдаёт <code>errmsg(&quot;value too long for type
+    character varying(%d)&quot;)</code>. Проверяем на таблице изданий:</p>
+
+    <pre><code class="language-sql">INSERT INTO editions (edition_id, book_id, format, price)
+VALUES (5, 1, 'pocket-format', 300.00);</code></pre>
+
+    <pre class="sample-output">ERROR:  value too long for type character varying(10)</pre>
+
+    <p>Поведение <code>char(n)</code>: паддинг пробелами виден напрямую:</p>
+
+    <pre><code class="language-sql">SELECT '|' || 'ab'::char(5) || '|' AS padded,
+       '|' || 'ab'::varchar(5) || '|' AS not_padded;</code></pre>
+
+    <pre class="sample-output"> padded  | not_padded
+---------+------------
+ |ab   | |ab|
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>char(5)</code> довёл «ab» до пяти символов
+    пробелами — «значения типа character дополняются пробелами»;
+    <code>varchar</code> хранил как есть. Соседнее правило той же страницы
+    (8.3) легко упустить: при <i>явном</i> приведении к другому строковому
+    типу хвостовые пробелы отбрасываются — <code>'ab'::char(5)::text</code>
+    вернёт <code>ab</code>, а не <code>ab&nbsp;&nbsp;&nbsp;</code>: «пробелы в конце
+    удаляются при преобразовании значения типа character к одному из
+    других строковых типов».</p>
+    <p>Производительность — прямо из Tip к 8.3: «нет разницы в
+    производительности между этими тремя типами», кроме увеличенного
+    места на диске у типа с дополнением пробелами и нескольких лишних
+    тактов процессора на проверку длины при записи в столбец с
+    ограничением; «в некоторых других СУБД у character(n) есть
+    преимущества по производительности, но в PostgreSQL такого
+    преимущества нет; фактически character(n) обычно самый медленный из
+    трёх» (перевод дословный). Практический
+    выбор: строка без разумного предела — <code>text</code>; предел диктуется
+    предметной областью (мобильный номер, код ISO) — <code>varchar(n)</code>
+    как документация ограничения.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему для цен выбран numeric(6,2), а не double
+      precision? Что произойдёт с суммой 0.1 + 0.2 в каждом из типов?</summary>
+      <p><b>Ответ.</b> numeric — точный тип с выбираемой точностью
+      («до 131072 цифр...»), double precision — «неточный...
+      значения хранятся как ближайшее приближение» IEEE 754 (8.1.2,
+      8.1.3). В numeric 0.1 + 0.2 = 0.3 точно; в double precision
+      сумма приближений не равна приближению 0.3 (пример выше —
+      <code>double_eq = f</code>). Для денег терять копейки на приближениях
+      недопустимо.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Столбец year у книг — integer. Какие значения
+      туда не поместятся и что произойдёт при попытке? Что выбрать для
+      популяции Земли?</summary>
+      <p><b>Ответ.</b> Диапазон integer: -2147483648..+2147483647
+      (таблица 8.2). Попытка выйти за него — ошибка <code>integer out of
+      range</code>: сложение integer реализовано функцией <code>int4pl</code> с
+      проверкой переполнения
+      (src/backend/utils/adt/int.c#L829 на базовом коммите). Популяция
+      Земли (~8·10⁹) — только bigint (±9.2·10¹⁸).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем отличаются попытки записать строку
+      '0123456789012' в varchar(10) и результат явного приведения
+      '0123456789012'::varchar(10)?</summary>
+      <p><b>Ответ.</b> Запись в столбец varchar(10) сверхлимитной
+      строки — ошибка «value too long for type character varying(10)»
+      (varchar.c#L475; усечение только если лишние символы — пробелы).
+      Явное приведение <code>::varchar(10)</code> усечёт до 10 символов без
+      ошибки — «тоже требуется стандартом SQL» (раздел 8.3).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-08-window-functions.html">← Предыдущая: 2.8. Оконные функции</a>
+      <a class="next" href="03-02-datetime-types.html">Следующая: 3.2. Дата и время →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/datatype-numeric.html">Numeric Types (8.1: Integer Types, Arbitrary Precision, Floating-Point, Serial)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype-character.html">Character Types (8.3)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/int.c#L829">src/backend/utils/adt/int.c#L829</a>
+        (функция int4pl, ошибка «integer out of range»);
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/varchar.c#L475">src/backend/utils/adt/varchar.c#L475</a>
+        (ошибка «value too long for type character varying»).</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — главы 4.1–4.2
+        (числовые и строковые типы).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

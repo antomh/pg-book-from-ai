@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 1.2. Кластер, база данных, роль; psql — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="01-02-cluster-database-role-psql">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m01">Модуль 1. Основы и реляционная модель</a> /
+    <span aria-current="page">Глава 1.2. Кластер, база данных, роль; psql</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 1.2. Кластер, база данных, роль; psql</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T02 · PostgreSQL 17.11</p>
+
+    <h2>Куда именно вы «входите», когда подключаетесь к PostgreSQL</h2>
+    <p>Сценарий: вы установили PostgreSQL, открыли psql и создали таблицы учебного
+    проекта. Через месяц появляется второй проект — и вопрос: «завести ещё одну
+    базу или ещё одну таблицу в той же?» А рядом вопрос коллеги: «дай мне доступ,
+    только к моим таблицам». Чтобы отвечать на такие вопросы, нужно понимать, из
+    каких уровней состоит работающий PostgreSQL и что из этого видно из одного
+    подключения. Это глава о каркасе, в который попадают все ваши таблицы.</p>
+
+    <h2>Иерархия: кластер → базы → схемы → таблицы</h2>
+    <p>Документация описывает устройство так (раздел «Schemas», 5.10,
+    <a href="https://www.postgresql.org/docs/17/ddl-schemas.html">/docs/17/ddl-schemas.html</a>,
+    дословно в переводе):</p>
+    <blockquote>
+      <p>Кластер баз данных PostgreSQL содержит одну или несколько именованных
+      баз данных. Роли и некоторые другие типы объектов общие для всего кластера.
+      Клиентское подключение к серверу может обращаться к данным только одной
+      базы — той, что указана в запросе на соединение.</p>
+    </blockquote>
+    <p>И далее там же: «база данных содержит одну или несколько именованных схем,
+    которые, в свою очередь, содержат таблицы; схемы также содержат и другие
+    именованные объекты — типы данных, функции, операторы».</p>
+    <p>В виде схемы уровней:</p>
+    <pre class="sample-output">кластер (набор баз данных, управляемый одним
+   работающим экземпляром сервера PostgreSQL)
+├── база bookshelf
+│   ├── схема public  → таблицы authors, books
+│   └── схема archive → таблицы books_2023
+├── база postgres (создаётся при инициализации)
+└── базы-шаблоны template0, template1
+      (используются как образцы для CREATE DATABASE)
+
+роли: postgres, app_user, …   ← общие на весь кластер, базе не принадлежат</pre>
+
+    <p>Два следствия из этой цитаты, которые часто удивляют новичков:</p>
+    <ul>
+      <li><b>Одно подключение = одна база.</b> Запрос SQL изнутри сессии не может
+        обратиться к таблицам другой базы того же кластера. Чтобы перейти на другую
+        базу, нужно новое соединение с указанием её имени (в psql метакоманда
+        <code>\c</code> «устанавливает новое соединение с сервером PostgreSQL» —
+        дословно по документации; она заменяет текущее подключение, а не
+        расширяет).</li>
+      <li><b>Роли не принадлежат базам.</b> У каждой роли есть право или запрет на
+        доступ к конкретной базе, но сама учётная запись — одна на весь кластер:
+        не может быть двух разных ролей с именем <code>joe</code> в двух базах
+        одного кластера (там же, 5.10).</li>
+    </ul>
+    <p>Почему база — именно «верхний» уровень: документация главы «Managing
+    Databases» формулирует прямо: «базы данных — это самый верхний иерархический
+    уровень организации SQL-объектов»
+    (<a href="https://www.postgresql.org/docs/17/managing-databases.html">/docs/17/managing-databases.html</a>,
+    раздел Overview).</p>
+
+    <h3>Схемы внутри базы</h3>
+    <p>Схема — это пространство имён внутри базы. В базах, создаваемых
+    по умолчанию, есть схема <code>public</code>: таблицы без явного указания
+    схемы попадают в неё, и обращения вида <code>books</code> без префикса
+    интерпретируются через неё (механизм поиска имён <code>search_path</code>
+    подробно разобран в главе 4.5). Свою схему создать просто:</p>
+
+    <pre><code class="language-sql">CREATE SCHEMA archive;</code></pre>
+
+    <p>после чего таблицы можно создавать уже в ней:
+    <code>CREATE TABLE archive.books_2023 (...)</code>. Синтаксис —
+    <a href="https://www.postgresql.org/docs/17/sql-createschema.html">/docs/17/sql-createschema.html</a>;
+    описание схем —
+    <a href="https://www.postgresql.org/docs/17/ddl-schemas.html">/docs/17/ddl-schemas.html</a>
+    (5.10).</p>
+
+    <h3>База и роль как объекты SQL</h3>
+    <p>Создание новой базы — обычная SQL-команда; право на неё даёт привилегия
+    CREATEDB (для ролей — раздел «Creating a Database» (22.2) в
+    <a href="https://www.postgresql.org/docs/17/managing-databases.html">Managing
+    Databases</a>, синтаксис —
+    <a href="https://www.postgresql.org/docs/17/sql-createdatabase.html">/docs/17/sql-createdatabase.html</a>):
+    </p>
+
+    <pre><code class="language-sql">CREATE DATABASE bookshelf;</code></pre>
+
+    <p>Учётные записи в PostgreSQL называются <b>ролями</b>. Документация главы
+    «Database Roles» формулирует: «концепция ролей вбирает в себя концепции
+    пользователей и групп»
+    (<a href="https://www.postgresql.org/docs/17/user-manag.html">/docs/17/user-manag.html</a>,
+    раздел Introduction). Роль с атрибутом LOGIN может подключаться к серверу:</p>
+
+    <pre><code class="language-sql">CREATE ROLE app_user LOGIN PASSWORD 'change-me';</code></pre>
+
+    <p>(синтаксис и атрибуты ролей —
+    <a href="https://www.postgresql.org/docs/17/sql-createrole.html">/docs/17/sql-createrole.html</a>;
+    выдача прав на объекты — тема главы 11.1). Подключаясь, вы всегда задаёте
+    пару «роль + база»: об этом — вводная часть
+    <a href="https://www.postgresql.org/docs/17/tutorial-start.html">Tutorial:
+    Getting Started</a>.</p>
+
+    <h2>psql: терминальный клиент</h2>
+    <p>psql — это «терминальный фронтенд к PostgreSQL: он позволяет вводить
+    запросы в интерактивном режиме, отправлять их в PostgreSQL и видеть
+    результаты», дословно по документации
+    <a href="https://www.postgresql.org/docs/17/app-psql.html">/docs/17/app-psql.html</a>.
+    Учебник не выполняет SQL за вас, поэтому дальше показываем сессии как
+    статические примеры: команда — и что будет выведено.</p>
+
+    <p>Подключение с указанием базы и осмотр окружения:</p>
+
+    <pre class="sample-output">$ psql bookshelf
+psql (17.11)
+Type "help" for help.
+
+bookshelf=# \dt
+         List of relations
+ Schema |  Name   | Type  | Owner
+--------+---------+-------+----------
+ public | authors | table | postgres
+ public | books   | table | postgres
+(2 rows)</pre>
+
+    <p>Что здесь произошло и почему: приглашение <code>bookshelf=#</code>
+    показывает имя текущей базы; <code>\dt</code> — метакоманда psql (команды,
+    начинающиеся с обратной косой черты), которая выводит список таблиц
+    (<code>\dt</code>, <code>\dn</code> — схемы, <code>\l</code> — базы данных;
+    полный список метакоманд — раздел «Meta-Commands» в
+    <a href="https://www.postgresql.org/docs/17/app-psql.html">документации
+    psql</a>). Метакоманды — это не SQL: они обрабатываются самим psql.</p>
+
+    <p>Переход на другую базу — отдельным переподключением:</p>
+
+    <pre class="sample-output">bookshelf=# \c postgres
+You are now connected to database "postgres" as user "postgres".
+postgres=#</pre>
+
+    <p>Что здесь произошло и почему: <code>\c</code> устанавливает новое
+    соединение к серверу с новыми параметрами (база, пользователь, хост, порт);
+    прежнее соединение замещается — формулировка и синтаксис приведены в
+    разделе «Meta-Commands» документации psql
+    (<a href="https://www.postgresql.org/docs/17/app-psql.html">/docs/17/app-psql.html</a>).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Приложение подключено к базе bookshelf. Может ли оно
+      одним и тем же соединением выполнить запрос к таблице в базе postgres?</summary>
+      <p><b>Ответ.</b> Нет. Клиентское подключение работает ровно с одной базой —
+      той, что указана при соединении; это зафиксировано в разделе 5.10
+      «Schemas»:
+      <a href="https://www.postgresql.org/docs/17/ddl-schemas.html">/docs/17/ddl-schemas.html</a>.
+      Нужна таблица из другой базы — это отдельное соединение (или перенос данных
+      в одну базу, например в разные схемы).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Две команды в вашей компании используют один кластер
+      PostgreSQL. Почему не получится завести в каждой командной базе роль
+      с одинаковым именем reader?</summary>
+      <p><b>Ответ.</b> Роли общие для всего кластера, базе они не принадлежат —
+      там же, 5.10. Имя роли уникально в кластере; доступ роли к конкретным базам
+      настраивается отдельно. Разграничение «чужое-своё» внутри одной базы делают
+      схемы и привилегии (главы 4.5 и 11.1).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем метакоманда psql \dt отличается от SQL-запроса
+      SELECT? Почему вывод \dt выглядит «по-человечески»?</summary>
+      <p><b>Ответ.</b> Метакоманды обрабатывает сам клиент psql (они начинаются с
+      обратной черты и не отправляются на сервер в исходном виде), а SELECT —
+      язык запросов сервера. Удобный вывод \dt — тоже работа клиента. И там и
+      там данные об объектах берутся из хранимых сервером метаданных — что это
+      за хранилище, показывает глава 1.3.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="01-01-db-and-relational-model.html">← Предыдущая: 1.1. Что такое базы данных и реляционная модель</a>
+      <a class="next" href="01-03-system-catalog.html">Следующая: 1.3. Системный каталог и information_schema →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/ddl-schemas.html">Schemas (5.10)</a>,
+        <a href="https://www.postgresql.org/docs/17/managing-databases.html">Managing Databases (гл. 22)</a>,
+        <a href="https://www.postgresql.org/docs/17/user-manag.html">Database Roles (гл. 21)</a>,
+        <a href="https://www.postgresql.org/docs/17/app-psql.html">psql (Reference, Meta-Commands)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createdatabase.html">CREATE DATABASE</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createrole.html">CREATE ROLE</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createschema.html">CREATE SCHEMA</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-start.html">Tutorial: Getting Started</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

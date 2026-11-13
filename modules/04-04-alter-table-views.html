@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 4.4. ALTER TABLE и представления — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="04-04-alter-table-views">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m04">Модуль 4. DDL и проектирование</a> /
+    <span aria-current="page">Глава 4.4. ALTER TABLE и представления</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 4.4. ALTER TABLE и представления</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T21 · PostgreSQL 17.11</p>
+
+    <h2>Схема живёт дольше первого релиза</h2>
+    <p>Через месяц после запуска продукт просит: хранить источник
+    каждого отзыва (веб или приложение), переименовать колонку,
+    добавить проверку. База не пустая и под нагрузкой — «удалить и
+    пересоздать таблицу» не вариант. С другой стороны, коллеги
+    копируют в код один и тот же JOIN из трёх таблиц, и при
+    переименовании колонки правки разъезжаются по пятнадцати местам.
+    На два этих класса задач PostgreSQL отвечает двумя
+    инструментами: <code>ALTER TABLE</code> для изменения таблиц и
+    представлениями для именованных запросов.</p>
+
+    <h2>ALTER TABLE: что дёшево, что дорого</h2>
+    <p>Справочник
+    (<a href="https://www.postgresql.org/docs/17/sql-altertable.html">/docs/17/sql-altertable.html</a>)
+    — самая объёмная команда DDL; для junior-уровня достаточно
+    пяти форм. Первые две — дешёвые операции с метаданными:</p>
+
+    <pre><code class="language-sql">ALTER TABLE reviews ADD COLUMN source text NOT NULL DEFAULT 'web';
+ALTER TABLE books RENAME COLUMN rating TO base_rating;</code></pre>
+
+    <p>Про ADD COLUMN справочник говорит дословно: «эта форма
+    добавляет новый столбец в таблицу, используя тот же синтаксис,
+    что CREATE TABLE». Почему миллионы строк не переписываются —
+    отвечает примечание Notes: «когда столбец добавляется с ADD
+    COLUMN и указан неволатильный (non-volatile) DEFAULT, значение
+    по умолчанию вычисляется в момент выполнения оператора и
+    результат сохраняется в метаданных таблицы. Это значение будет
+    использоваться для столбца во всех существующих строках. Если
+    DEFAULT не указан, используется NULL. В обоих случаях
+    переписывание таблицы не требуется». Механизм: значение лежит
+    в каталоге один раз, а не в каждой строке; при чтении старых
+    строк PostgreSQL подставляет его. Дальше — граница дешевизны,
+    дословно: «добавление столбца с волатильным DEFAULT или
+    изменение типа существующего столбца потребует переписать всю
+    таблицу и её индексы». Поэтому DEFAULT <code>now()</code> при ALTER —
+    дорогая операция на большой таблице, а DEFAULT 'web' —
+    мгновенная (про волатильность выражений — глава 10.1).</p>
+    <p>DROP COLUMN: «эта форма удаляет столбец из таблицы. Индексы и
+    табличные ограничения, включающие этот столбец, будут удалены
+    автоматически» (там же). RENAME меняет имя без изменения
+    данных. Четвёртая форма — добавление ограничения на живые
+    данные: «обычно эта форма вызывает сканирование таблицы для
+    проверки, что все существующие строки удовлетворяют новому
+    ограничению. Но если указана опция NOT VALID, этот потенциально
+    долгий скан пропускается» — ограничение начнёт действовать на
+    новые записи, а старые проверят позже (<code>VALIDATE CONSTRAINT</code>).
+    Пятая — смена типа столбца (<code>ALTER COLUMN ... TYPE ...</code>),
+    требующая перезаписи таблицы и индексов по цитате Notes выше.</p>
+
+    <h2>Мост: от учебной таблицы из 2.8 к полной схеме</h2>
+    <p>Настало время выполнить обещанное в главе 4.2: привести
+    таблицу <code>reviews</code> из главы 2.8
+    <code>(review_id, book_id, rating)</code> к целевому DDL.
+    Миграция собирается из уже разобранных форм ALTER TABLE —
+    каждая группа команд ниже закрывает одно расхождение со
+    целевой схемой:</p>
+
+    <pre><code class="language-sql">-- 1) оценка: integer → smallint плюс проверка диапазона (CHECK из 4.2)
+ALTER TABLE reviews ALTER COLUMN rating TYPE smallint;
+ALTER TABLE reviews ADD CONSTRAINT reviews_rating_check
+    CHECK (rating BETWEEN 1 AND 5);
+
+-- 2) у отзыва появляются читатель, текст и время создания
+ALTER TABLE reviews
+    ADD COLUMN reader_id integer REFERENCES readers,
+    ADD COLUMN comment text,
+    ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
+INSERT INTO readers (reader_id, email, display_name) VALUES
+    (2, 'ivan@example.com', 'Иван'),
+    (3, 'olga@example.com', 'Ольга');
+UPDATE reviews SET reader_id = CASE review_id
+    WHEN 1 THEN 2   -- Иван
+    WHEN 2 THEN 3   -- Ольга
+    WHEN 4 THEN 3
+    WHEN 5 THEN 3
+    WHEN 7 THEN 2
+    WHEN 8 THEN 3
+    ELSE 1          -- отзывы 3 и 6 — за Анной
+END;
+ALTER TABLE reviews ALTER COLUMN reader_id SET NOT NULL;
+
+-- 3) ключ: integer → bigint, с identity-последовательностью
+ALTER TABLE reviews ALTER COLUMN review_id TYPE bigint;
+ALTER TABLE reviews ALTER COLUMN review_id
+    ADD GENERATED BY DEFAULT AS IDENTITY;</code></pre>
+
+    <p>Пояснения по группам. (1) Смена типа на живых данных
+    потребует перезаписи таблицы (Notes выше), а новый CHECK
+    пройдёт: восемь оценок из главы 2.8 — от 3 до 5.
+    (2) <code>reader_id</code> добавлен без NOT NULL: сначала заполняем
+    существующие строки и только потом запрещаем NULL. Почему
+    не «все отзывы — Анне»: в главе 8.1 появится бизнес-правило
+    «один читатель оценивает книгу один раз», поэтому восемь
+    отзывов заранее раздаём трём читателям так, чтобы ни одна
+    пара (reader_id, book_id) не повторилась (у книги 1 и 6 по
+    два-три отзыва — их получают разные читатели); идентификаторы
+    читателей заданы явно — первичный ключ <code>readers</code> без
+    identity (глава 4.1), и мы держим нумерацию под контролем.
+    <code>created_at</code> с волатильным DEFAULT
+    <code>now()</code> проставил существующим строкам момент ALTER.
+    (3) Формы <code>ADD GENERATED ... AS IDENTITY</code> для существующего
+    столбца и <code>RESTART WITH</code> мы выполним после вставок ниже —
+    когда станет виден следующий свободный номер.
+    Заметьте: в целевом DDL у внешнего ключа на книги есть
+    <code>ON DELETE CASCADE</code>; наш столбец <code>book_id</code> ссылается на книги
+    из главы 2.8 без него. Добавить поведение в один шаг нельзя,
+    зато можно пересоздать ограничение:</p>
+
+    <pre><code class="language-sql">-- 4) FK на книги: добавить ON DELETE CASCADE (глава 4.2)
+ALTER TABLE reviews
+    DROP CONSTRAINT reviews_book_id_fkey,
+    ADD CONSTRAINT reviews_book_id_fkey
+        FOREIGN KEY (book_id) REFERENCES books ON DELETE CASCADE;</code></pre>
+
+    <p>Теперь схема совпадает с целевым DDL главы 4.2 (кроме
+    identity-настройки, до неё одна строка ниже).</p>
+
+    <h2>VIEW: именованный запрос</h2>
+    <p>Проблему «JOIN на три таблицы в каждом отчёте» решает
+    представление: оно «даёт имя запросу, на который можно
+    ссылаться как на обычную таблицу» (туториал 3.2,
+    <a href="https://www.postgresql.org/docs/17/tutorial-views.html">/docs/17/tutorial-views.html</a>).
+    Справочник CREATE VIEW фиксирует ключевое свойство дословно:
+    «представление не материализуется физически. Вместо этого запрос
+    выполняется каждый раз, когда представление используется в
+    запросе».</p>
+
+    <pre><code class="language-sql">CREATE VIEW book_reviews AS
+SELECT r.review_id,
+       b.title,
+       a.name  AS author,
+       r.rating,
+       r.comment
+FROM reviews r
+JOIN books   b ON b.book_id = r.book_id
+JOIN authors a ON a.author_id = b.author_id;
+
+INSERT INTO reviews (review_id, book_id, reader_id, rating, comment)
+VALUES (9, 1, 1, 5, 'Перечитываю каждый год'),
+       (10, 4, 2, 4, 'Эпично');
+
+SELECT review_id, title, author, rating, comment
+FROM book_reviews
+WHERE review_id &gt;= 9
+ORDER BY review_id;</code></pre>
+
+    <pre class="sample-output"> review_id |      title       | author  | rating |       comment
+-----------+------------------+---------+--------+---------------------
+         9 | Евгений Онегин   | Пушкин  |      5 | Перечитываю каждый год
+        10 | Война и мир      | Толстой |      4 | Эпично
+(2 rows)</pre>
+
+    <p>Что выведено и почему: представление собрало данные трёх
+    таблиц по правилам JOIN из главы 2.3; строки 9–10 — новые
+    отзывы читателей 1 (Анна) и 2 (Иван) — идентификаторы
+    продолжают нумерацию восьми отзывов из главы 2.8;
+    book_id 1 — «Евгений Онегин»
+    Пушкина, book_id 4 — «Война и мир» Толстого (идентификаторы
+    соответствуют данным из главы 2.1). Никакая отдельная таблица не
+    хранилась: SELECT из book_reviews развернулся в JOIN по
+    базовым таблицам. Осталась последняя строка моста — настроить
+    identity-последовательность из пункта 3 на следующий свободный
+    номер:</p>
+
+    <pre><code class="language-sql">ALTER TABLE reviews ALTER COLUMN review_id RESTART WITH 11;</code></pre>
+
+    <pre class="sample-output">ALTER TABLE</pre>
+
+    <p>Явные вставки 9–10 последовательность не двигали — так
+    работает GENERATED BY DEFAULT (глава 4.6): номер выдается только
+    когда столбец не указан явно. Теперь столбец готов выдавать
+    номера автоматически — это пригодится в главе 10.2.</p>
+
+    <h3>Как это работает внутри: переписывание запроса</h3>
+    <p>Механизм — не «магический executor», а переписывание
+    дерева запроса. В конвейере сервера между разбором SQL и
+    планированием есть стадия перезаписи; её точка входа — функция
+    <code>QueryRewrite</code> в файле
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/rewrite/rewriteHandler.c#L4556">src/backend/rewrite/rewriteHandler.c#L4556</a>
+    на базовом коммите: «Primary entry point to the query rewriter.
+    Rewrite one query via query rewrite system, possibly returning
+    0 or many queries» (комментарий в исходнике). Ссылку на
+    представление система находит в каталоге (по строке в
+    <code>pg_class</code>, где представление — объект с собственным OID, гл.
+    51.11), подставляет вместо неё сохранённый при CREATE VIEW
+    запрос и уже потом передаёт результат планировщику. Поэтому
+    представление «вычисляется в момент обращения»: каждая
+    выборка из него — свежий JOIN. Подробный разбор пути запроса —
+    глава 9.1.</p>
+
+    <h2>MATERIALIZED VIEW: сохранённый результат</h2>
+    <p>Если JOIN тяжёлый, а свежесть данных не критична, результат
+    можно сохранить: «CREATE MATERIALIZED VIEW определяет
+    материализованное представление запроса. Запрос выполняется и
+    используется для наполнения представления в момент выпуска
+    команды (если не используется WITH NO DATA) и может быть
+    обновлён позже командой REFRESH MATERIALIZED VIEW»
+    (<a href="https://www.postgresql.org/docs/17/sql-creatematerializedview.html">/docs/17/sql-creatematerializedview.html</a>).
+    Статистика по книгам — типичный кандидат:</p>
+
+    <pre><code class="language-sql">CREATE MATERIALIZED VIEW book_stats AS
+SELECT b.title,
+       count(*)      AS review_cnt,
+       avg(r.rating) AS avg_rating
+FROM books b
+JOIN reviews r ON r.book_id = b.book_id
+GROUP BY b.title;
+
+REFRESH MATERIALIZED VIEW book_stats;</code></pre>
+
+    <p>Что произойдёт и почему: при CREATE данные агрегируются
+    один раз и хранятся в собственном отношении (у MV «многие те же
+    свойства, что у таблицы», там же); между CREATE и REFRESH
+    содержимое не меняется само — «запрос... может быть обновлён
+    позже». Цена такого кэша — устаревание: отзыв, добавленный
+    после REFRESH, в book_stats попадёт только после следующего
+    REFRESH. Выбор между VIEW и MATERIALIZED VIEW — это выбор между
+    свежестью и скоростью чтения.</p>
+    <p>Про имена: у представлений те же правила идентификаторов, что
+    у таблиц (глава 4.1); представление занимает имя в схеме наравне
+    с таблицами — «имя представления должно отличаться от имён всех
+    прочих отношений (таблиц, последовательностей, индексов,
+    представлений, материализованных представлений или сторонних
+    таблиц) в той же схеме» (CREATE VIEW).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему <code>ALTER TABLE reviews ADD COLUMN
+      source text NOT NULL DEFAULT &#x27;web&#x27;</code> выполняется мгновенно на
+      таблице в миллиард строк, а то же самое с DEFAULT now() —
+      долго?</summary>
+      <p><b>Ответ.</b> Неволатильный DEFAULT вычисляется один раз «в
+      момент выполнения оператора», а результат «сохраняется в
+      метаданных таблицы» — «переписывание таблицы не требуется»
+      (Notes, ALTER TABLE). Волатильный DEFAULT (например now())
+      требует своего значения для каждой строки: «добавление
+      столбца с волатильным DEFAULT... потребует переписать всю
+      таблицу и её индексы».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем работа представления отличается от
+      материализованного представления, и где в конвейере сервера
+      «появляется» представление при SELECT из него?</summary>
+      <p><b>Ответ.</b> VIEW: «не материализуется физически... запрос
+      выполняется каждый раз, когда представление используется»
+      (CREATE VIEW); MATERIALIZED VIEW: «запрос выполняется и
+      используется для наполнения представления в момент выпуска
+      команды... и может быть обновлён позже» (CREATE MATERIALIZED
+      VIEW). Ссылку на представление переписывает query rewriter —
+      точка входа <code>QueryRewrite</code> в
+      src/backend/rewrite/rewriteHandler.c#L4556 на базовом коммите;
+      это происходит до планирования.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Что произойдёт с индексами и ограничениями
+      при <code>ALTER TABLE books DROP COLUMN base_rating</code>, и как добавить
+      CHECK-ограничение, не блокируя таблицу надолго?</summary>
+      <p><b>Ответ.</b> «Индексы и табличные ограничения, включающие
+      этот столбец, будут удалены автоматически» (ALTER TABLE, DROP
+      COLUMN). Для CHECK — форма ADD CONSTRAINT ... NOT VALID:
+      «обычно эта форма вызывает сканирование таблицы... но если
+      указана опция NOT VALID, этот потенциально долгий скан
+      пропускается»; проверка старых строк откладывается до
+      VALIDATE CONSTRAINT.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="04-03-normalization-and-relations.html">← Предыдущая: 4.3. Связи и нормализация</a>
+      <a class="next" href="04-05-schemas-search-path.html">Следующая: 4.5. Схемы и search_path →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-altertable.html">ALTER TABLE (Description, Notes)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createview.html">CREATE VIEW</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-creatematerializedview.html">CREATE MATERIALIZED VIEW</a>,
+        <a href="https://www.postgresql.org/docs/17/tutorial-views.html">Views (туториал, 3.2)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/rewrite/rewriteHandler.c#L4556">src/backend/rewrite/rewriteHandler.c#L4556</a>
+        (<code>QueryRewrite</code> — точка входа query rewriter).</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 5.3
+        (модификация таблиц), § 5.4 (представления).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

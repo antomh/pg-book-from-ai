@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 3.4. Массивы — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="03-04-arrays">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m03">Модуль 3. Типы данных</a> /
+    <span aria-current="page">Глава 3.4. Массивы</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 3.4. Массивы</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T15 · PostgreSQL 17.11</p>
+
+    <h2>У книги несколько тегов: куда их положить</h2>
+    <p>Теги книги — типичный многозначный атрибут: «классика»,
+    «поэзия», «роман». Реляционный ответ — отдельная таблица тегов и
+    таблица связи «книга–тег» (модуль 4). Но для маленьких и «плоских»
+    списков PostgreSQL предлагает более короткий путь: хранить список
+    прямо в столбце как массив. Глава отвечает на вопросы: как
+    объявлять, записывать, читать и фильтровать массивы — и где
+    граница разумности этого приёма. Это глава уровня J+.</p>
+
+    <h2>Объявление и запись</h2>
+    <p>«PostgreSQL позволяет определять столбцы таблицы как
+    переменной длины многомерные массивы. Массивы любого встроенного
+    или пользовательского базового типа, enum-типа, составного типа,
+    типа диапазона или домена могут быть созданы» — раздел 8.15
+    (<a href="https://www.postgresql.org/docs/17/arrays.html">/docs/17/arrays.html</a>).
+    Тип массива записывается добавлением <code>[]</code> к типу элемента;
+    сами массивы как тип столбца — расширение PostgreSQL: в стандарте
+    SQL массивных типов нет (стандарт описывает лишь запись значений
+    конструктором <code>ARRAY</code> для одномерных массивов, о чём ниже).
+    Добавим теги книгам:</p>
+
+    <pre><code class="language-sql">ALTER TABLE books ADD COLUMN tags text[];
+
+UPDATE books SET tags = ARRAY['классика', 'поэзия'] WHERE book_id = 1;
+UPDATE books SET tags = ARRAY['классика']             WHERE book_id = 2;
+UPDATE books SET tags = ARRAY['классика', 'роман']    WHERE book_id = 4;</code></pre>
+
+    <p>Два способа записи значения — конструктор <code>ARRAY[...]</code> и
+    строковый литерал в фигурных скобках (документация показывает оба
+    на таблице <code>sal_emp</code> из 8.15.1):</p>
+
+    <pre><code class="language-sql">UPDATE books SET tags = '{"детектив", NULL}' WHERE book_id = 6;
+
+SELECT title, tags FROM books WHERE book_id IN (1, 6);</code></pre>
+
+    <pre class="sample-output">       title       |         tags
+-------------------+----------------------
+ Евгений Онегин    | {классика,поэзия}
+ Детектив XXI века | {детектив,NULL}
+(2 rows)</pre>
+
+    <p>Что выведено и почему: вывод массива — в фигурных скобках через
+    запятую; массив может содержать NULL-элемент — это не то же самое,
+    что NULL-массив или пустой массив. Важная деталь про объявления
+    из 8.15.1: «текущая реализация не принуждает к фиксированной
+    длине массива... объявление размера или числа измерений массива в
+    CREATE TABLE — просто документация; оно не влияет на поведение во
+    время выполнения» — то есть <code>text[3]</code> не ограничит длину.</p>
+
+    <h2>Чтение: индексы, срезы, размеры</h2>
+    <p>«По умолчанию PostgreSQL использует нумерацию массивов с
+    единицы: массив из n элементов начинается с array[1] и кончается
+    array[n]» (8.15.3). Извлечение элемента, среза и длин:</p>
+
+    <pre><code class="language-sql">SELECT tags[1]          AS first_tag,
+       tags[1:2]       AS slice,
+       cardinality(tags) AS total_tags,
+       array_length(tags, 1) AS dim1_len
+FROM books WHERE book_id = 1;</code></pre>
+
+    <pre class="sample-output"> first_tag |      slice      | total_tags | dim1_len
+-----------+-----------------+------------+----------
+ классика  | {классика,поэзия} |          2 |        2
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>tags[1]</code> — первый элемент (нумерация с
+    1); <code>tags[1:2]</code> — срез, сам массив; <code>cardinality</code> — «общее число
+    элементов массива по всем измерениям; фактически — число строк,
+    которое вернул бы unnest» (9.19); <code>array_length(tags, 1)</code> — длина
+    первого измерения (и NULL для отсутствующих измерений — «NULL
+    вместо 0 для пустых или отсутствующих измерений массива», 9.19).
+    Поведение при выходе за границы задокументировано точно:
+    «выражение индекса массива вернёт null, если сам массив или
+    любое из выражений индексов равны null. Также null
+    возвращается, если индекс вне границ массива (этот случай не
+    вызывает ошибку)... ссылка на массив с неверным числом
+    индексов даёт null, а не ошибку» (8.15.3, перевод
+    дословный).</p>
+
+    <h2>Поиск по массиву</h2>
+    <p>Первый способ — из 8.15.5 дословно: «альтернативный метод»
+    поиска по массиву — оператор ANY: <code>SELECT * FROM sal_emp WHERE
+    10000 = ANY (pay_by_quarter)</code> (в документации это замена
+    громоздкого <code>WHERE pay_by_quarter[1] = 10000 OR ...</code>). На тегах:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books WHERE 'поэзия' = ANY (tags);</code></pre>
+
+    <pre class="sample-output">      title
+-----------------
+ Евгений Онегин
+(1 row)</pre>
+
+    <p>Второй способ — специальные операторы из таблицы 9.19
+    (<a href="https://www.postgresql.org/docs/17/functions-array.html">/docs/17/functions-array.html</a>):
+    <code>@&gt;</code> — «содержит ли первый массив второй» (<code>ARRAY[1,4,3] @&gt;
+    ARRAY[3,1] → t</code>), <code>&amp;&amp;</code> — «перекрываются ли массивы, то есть
+    есть ли общие элементы», <code>&lt;@</code> — обратное вложению, <code>||</code> —
+    конкатенация:</p>
+
+    <pre><code class="language-sql">SELECT title FROM books WHERE tags @> ARRAY['классика'];
+SELECT title FROM books WHERE tags &amp;&amp; ARRAY['поэзия', 'фантастика'];
+SELECT tags || ARRAY['новинка'] AS extended FROM books WHERE book_id = 2;</code></pre>
+
+    <p>Что будет выведено и почему: первый запрос вернёт три книги —
+    «Онегина», «Руслана» и «Войну и мир» (их массивы содержат
+    'классика'); второй — только «Онегина» (пересечение массивов
+    непусто лишь там, где есть 'поэзия'); третий — массив
+    <code>{классика,новинка}</code> — конкатенация <code>||</code> добавила элемент.</p>
+
+    <h2>Массив и строки: unnest и array_agg</h2>
+    <p><code>unnest(anyarray)</code> — «разворачивает массив в множество строк.
+    Элементы массива читаются в порядке хранения» (9.19). Вместе с
+    агрегатом <code>array_agg</code> («собирает все входные значения, включая
+    null, в массив», 9.21) получается обратимое преобразование:</p>
+
+    <pre><code class="language-sql">SELECT book_id, unnest(tags) AS tag
+FROM books
+WHERE book_id IN (1, 2)
+ORDER BY book_id, tag;</code></pre>
+
+    <pre class="sample-output"> book_id |   tag
+---------+----------
+       1 | классика
+       1 | поэзия
+       2 | классика
+(3 rows)</pre>
+
+    <pre><code class="language-sql">SELECT book_id, array_agg(tag ORDER BY tag) AS tags
+FROM (SELECT book_id, unnest(tags) AS tag
+      FROM books WHERE book_id IN (1, 2)) AS flat
+GROUP BY book_id;</code></pre>
+
+    <pre class="sample-output"> book_id |         tags
+---------+----------------------
+       1 | {классика,поэзия}
+       2 | {классика}
+(2 rows)</pre>
+
+    <p>Что выведено и почему: unnest превратил два массива в три строки
+    (по числу элементов), array_agg собрал строки каждой группы
+    обратно в массив — по сути, это «группировка по книге» из
+    главы 2.4, только с массивом на выходе.</p>
+
+    <h2>Когда массив — правильный выбор</h2>
+    <p>Массив уместен, когда список — атомарный атрибут одной строки
+    (теги записи, телефонные номера контакта) и вы готовы жить без
+    ссылочной целостности на элементы: внешний ключ не может
+    ссылаться на элементы массива — FK ссылается на ключи таблицы
+    (глава 1.1), а элементы массива таблицей не являются. Как только
+    по элементам нужны отдельные атрибуты, уникальность или связи —
+    это уже таблица тегов и таблица связи (модуль 4); массивы при этом
+    остаются удобным форматом вывода: «собрать теги книги в одну
+    строку отчёта» — типовая работа array_agg.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Что вернёт <code>tags[1]</code> для книги 6 с массивом
+      '{"детектив", NULL}' и почему обращение к tags[5] — не
+      ошибка?</summary>
+      <p><b>Ответ.</b> <code>tags[1]</code> = 'детектив' (нумерация с единицы,
+      8.15.3). <code>tags[5]</code> вернёт NULL: обращение к отсутствующему
+      элементу не проверяется как ошибка — как и <code>array_length</code>,
+      работающий «NULL вместо 0» с отсутствующими измерениями (9.19).
+      NULL-элемент внутри массива при этом остаётся NULL-значением
+      элемента, не «концом» массива.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем <code>tags @&gt; ARRAY[&#x27;классика&#x27;,&#x27;поэзия&#x27;]</code>
+      отличается от <code>tags &amp;&amp; ARRAY[&#x27;классика&#x27;,&#x27;поэзия&#x27;]</code>?</summary>
+      <p><b>Ответ.</b> <code>@&gt;</code> требует, чтобы массив содержал все
+      перечисленные элементы («содержит ли первый массив второй»),
+      <code>&amp;&amp;</code> — чтобы был хотя бы один общий элемент («есть ли
+      элементы в общем»). Определения — таблица операторов массивов в
+      <a href="https://www.postgresql.org/docs/17/functions-array.html">9.19</a>:
+      <code>ARRAY[1,4,3] @&gt; ARRAY[3,1]</code> → t; <code>ARRAY[1,4,3] &amp;&amp;
+      ARRAY[2,1]</code> → t.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему объявление <code>tags text[3]</code> не защитит от
+      массива из пяти элементов, и что выбрать, если защита нужна?</summary>
+      <p><b>Ответ.</b> «Объявление размера или числа измерений массива
+      в CREATE TABLE — просто документация; оно не влияет на
+      поведение во время выполнения» (8.15.1). Если нужен инвариант —
+      использовать ограничение целостности на столбце, например
+      CHECK (cardinality(tags) &lt;= 3) (ограничения CHECK — тема
+      главы 4.2).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-03-boolean-uuid-enum.html">← Предыдущая: 3.3. boolean, uuid, enum</a>
+      <a class="next" href="03-05-json-jsonb.html">Следующая: 3.5. JSON и JSONB →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/arrays.html">Arrays (8.15: Declaration, Accessing, Searching, Input/Output Syntax)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-array.html">Array Functions and Operators (9.19)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">array_agg (9.21)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — глава 4.5
+        (массивы).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

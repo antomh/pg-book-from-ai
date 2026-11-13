@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 4.1. CREATE TABLE: столбцы, DEFAULT, идентификаторы — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="04-01-create-table">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m04">Модуль 4. DDL и проектирование</a> /
+    <span aria-current="page">Глава 4.1. CREATE TABLE: столбцы, DEFAULT, идентификаторы</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 4.1. CREATE TABLE: столбцы, DEFAULT, идентификаторы</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T18 · PostgreSQL 17.11</p>
+
+    <h2>Таблица создана — а обратиться к ней нельзя</h2>
+    <p>Разработчик пишет в миграции <code>CREATE TABLE "Readers" (...)</code> —
+    ORM обрамляет идентификаторы кавычками и сохраняет заглавную
+    букву, как принято в коде приложения. Затем выполняет вручную
+    <code>SELECT * FROM readers</code> и получает ошибку «relation "readers"
+    does not exist». Таблица существует, но под другим именем. Это
+    первое, что глава объясняет: правила именования и фолдинг регистра
+    в PostgreSQL. Второе: только что созданная таблица принимает
+    <i>любые</i> данные — NULL в любом столбце, никаких значений по
+    умолчанию. Как задать таблице «правила приёма» столбец за
+    столбцом — вторая половина главы.</p>
+
+    <h2>CREATE TABLE: минимальное определение</h2>
+    <p>Справочник команд
+    (<a href="https://www.postgresql.org/docs/17/sql-createtable.html">/docs/17/sql-createtable.html</a>)
+    описывает команду так: «CREATE TABLE создаст новую, изначально
+    пустую таблицу в текущей базе данных. Таблицей будет владеть
+    пользователь, выпустивший команду» (перевод дословный). Имена и
+    типы столбцов задаются в скобках; на типы ссылается модуль 3, на
+    ограничения — глава 4.2. Создадим читателей нашего дневника:</p>
+
+    <pre><code class="language-sql">CREATE TABLE readers (
+    reader_id     integer PRIMARY KEY,
+    email         varchar(255) NOT NULL UNIQUE,
+    display_name  text,
+    is_active     boolean NOT NULL DEFAULT true,
+    city          text,
+    registered_at timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+
+    <p>Таблица живёт в схеме: «если указано имя схемы (например,
+    CREATE TABLE myschema.mytable ...), таблица создаётся в указанной
+    схеме. Иначе она создаётся в текущей схеме» (там же). По
+    умолчанию текущая схема — <code>public</code>; устройство схем — глава 4.5.
+    Повторное выполнение CREATE TABLE для существующей таблицы —
+    ошибка; форма <code>CREATE TABLE IF NOT EXISTS</code> вместо ошибки
+    «просто выдаёт замечание (notice)» (Parameters, там же).</p>
+
+    <h2>DEFAULT: значение, которое вставится само</h2>
+    <p>Раздел Parameters справочника фиксирует правила дословно:
+    «предложение DEFAULT назначает столбцу значение данных по
+    умолчанию. Это любое выражение без переменных (в частности,
+    перекрёстные ссылки на другие столбцы текущей таблицы не
+    допускаются). Подзапросы также не допускаются. Тип данных
+    выражения по умолчанию должен соответствовать типу данных
+    столбца. Выражение по умолчанию используется в любой операции
+    вставки, которая не задаёт значения для этого столбца. Если у
+    столбца нет значения по умолчанию, то по умолчанию используется
+    null».</p>
+
+    <pre><code class="language-sql">INSERT INTO readers (reader_id, email, display_name)
+VALUES (1, 'anna@example.com', 'Анна');
+
+SELECT * FROM readers;</code></pre>
+
+    <pre class="sample-output"> reader_id |      email      | display_name | is_active |        registered_at
+-----------+-----------------+--------------+-----------+-----------------------------
+         1 | anna@example.com | Анна         | t         | 2026-11-20 19:03:11.552618+03
+(1 row)</pre>
+
+    <p>Что выведено и почему: INSERT не упомянул <code>is_active</code> и
+    <code>registered_at</code>, поэтому сработали DEFAULT — <code>true</code> и <code>now()</code>
+    (момент выполнения INSERT; поведение <code>now()</code> разобрано в главе
+    3.2). Значение по умолчанию — это <b>выражение</b>: константа,
+    вызов функции, арифметика; главное — без переменных и
+    подзапросов.</p>
+
+    <h2>NULL разрешён по умолчанию</h2>
+    <p>Если для столбца не написано ни <code>NOT NULL</code>, ни <code>DEFAULT</code>,
+    PostgreSQL вставит NULL. Формулировка из справочника CREATE
+    TABLE, параметр NULL: «столбцу разрешено содержать null-значения.
+    Это поведение по умолчанию». То же у ограничения NOT NULL
+    (глава 4.2): без него столбец «просто принимает» отсутствующее
+    значение. Практическое правило: в миграции у каждого столбца
+    осознанно написано либо <code>NOT NULL</code>, либо осознанно допущен NULL —
+    «молчаливых» столбцов быть не должно. Заметьте: в нашем примере
+    <code>display_name</code> — осознанный NULL: не все читатели указывают
+    имя.</p>
+
+    <h2>Идентификаторы: регистр, кавычки, длина</h2>
+    <p>Раздел 4.1.1 «Identifiers and Key Words»
+    (<a href="https://www.postgresql.org/docs/17/sql-syntax-lexical.html">/docs/17/sql-syntax-lexical.html</a>)
+    задаёт лексические правила. Идентификатор начинается «с буквы
+    (a–z, но также букв с диакритикой и не-латинских букв) или
+    подчёркивания; последующие символы могут быть буквами,
+    подчёркиваниями, цифрами или знаками доллара», причём «знаки
+    доллара не разрешены в идентификаторах по букве стандарта SQL,
+    поэтому их использование может сделать приложения менее
+    переносимыми». Длина: «система использует не более
+    NAMEDATALEN-1 байт идентификатора; более длинные имена могут
+    быть записаны в командах, но будут усечены. По умолчанию
+    NAMEDATALEN равна 64, поэтому максимальная длина идентификатора —
+    63 байта».</p>
+    <p>Теперь — правило, которое сломало запрос из начала главы,
+    дословно: «закавычивание идентификатора делает его
+    регистрозависимым, тогда как незакавыченные имена всегда
+    сворачиваются к нижнему регистру. Например, идентификаторы FOO,
+    foo и "foo" считаются в PostgreSQL одинаковыми, но "Foo" и
+    "FOO" отличаются от этих трёх и друг от друга». Проверим на
+    живом примере:</p>
+
+    <pre><code class="language-sql">CREATE TABLE "Readers" (reader_id integer);
+
+SELECT * FROM readers;</code></pre>
+
+    <pre class="sample-output">ERROR:  relation "readers" does not exist</pre>
+
+    <p>Что выведено и почему: незакавыченные <code>Readers</code> и <code>readers</code>
+    оба свернулись к <code>readers</code>, но таблица была создана по правилам
+    для кавычек — с точным именем «Readers». Запрос ищет <code>readers</code>,
+    а такой таблицы нет; сообщение формируется в
+    <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/namespace.c#L638">src/backend/catalog/namespace.c#L638</a>
+    на базовом коммите (<code>errmsg(&quot;relation \&quot;%s\&quot; does not exist&quot;,
+    ...)</code> внутри функции <code>RangeVarGetRelidExtended</code>). Обратиться к
+    таблице можно только кавычками: <code>SELECT * FROM &quot;Readers&quot;;</code>.</p>
+    <p>Кавычки позволяют и большее: «закавыченные идентификаторы могут
+    содержать любые символы, кроме символа с кодом ноль» — имя с
+    пробелом или кириллицей без кавычек уже не написать
+    (<code>&quot;Мои читатели&quot;</code>). Наконец, важная пометка «стандарт против
+    диалекта», дословно: «свёртка незакавыченных имён к нижнему
+    регистру в PostgreSQL несовместима со стандартом SQL, который
+    говорит, что незакавыченные имена должны сворачиваться к верхнему
+    регистру. Если вы хотите писать переносимые приложения, вам
+    советуют всегда кавычить конкретное имя или никогда его не
+    кавычить». Ключевые слова (<code>SELECT</code>, <code>TABLE</code>) регистронезависимы;
+    идентификатор, совпадающий с ключевым словом, требует кавычек
+    («"select" может использоваться как имя столбца или таблицы,
+    тогда как незакавыченный select будет понят как ключевое слово»).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. В миграции написали <code>CREATE TABLE &quot;Books&quot;
+      (...)</code>. Какие из обращений сработают: <code>SELECT * FROM books</code>,
+      <code>SELECT * FROM Books</code>, <code>SELECT * FROM &quot;Books&quot;</code>? Почему?</summary>
+      <p><b>Ответ.</b> Сработает только третье. Таблица создана с
+      регистрозависимым именем «Books» (кавычки). Первые два
+      обращения — незакавыченные, они «всегда сворачиваются к
+      нижнему регистру» (4.1.1), то есть ищут <code>books</code>; такой таблицы
+      нет — ошибка «relation "books" does not exist»
+      (namespace.c#L638 на базовом коммите).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему DEFAULT <code>now()</code> в столбце
+      registered_at допустим, а DEFAULT <code>(SELECT max(id) FROM t)</code> —
+      нет? Что будет, если INSERT не укажет столбец с DEFAULT?</summary>
+      <p><b>Ответ.</b> Выражение по умолчанию — «любое выражение без
+      переменных»; «подзапросы также не допускаются» (Parameters,
+      CREATE TABLE). <code>now()</code> — вызов функции без аргументов-переменных,
+      допустим; подзапрос запрещён. Если INSERT не задаёт столбец,
+      используется «выражение по умолчанию... в любой операции
+      вставки, которая не задаёт значения для этого столбца»; без
+      DEFAULT — «по умолчанию используется null».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем <code>varchar(255)</code> отличается от <code>text</code> в
+      определении email, и что ограничит длину строки, если тип
+      безразличен к длине?</summary>
+      <p><b>Ответ.</b> Для хранения — ничем: «нет различия в
+      производительности» между character varying(n) и text, оба
+      хранят строки до ~1 ГБ (глава 3.1, 8.3). Длину в varchar(255)
+      ограничивает сам тип. Если нужен программный инвариант, не
+      покрытый типом (например, формат email), его задают
+      ограничением CHECK — глава 4.2.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="03-06-type-conversion.html">← Предыдущая: 3.6. Приведение и разрешение типов</a>
+      <a class="next" href="04-02-constraints.html">Следующая: 4.2. Ограничения →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-createtable.html">CREATE TABLE (Parameters: DEFAULT, NULL, IF NOT EXISTS; Description)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-syntax-lexical.html">Lexical Structure, Identifiers and Key Words (4.1.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/datatype-character.html">Character Types (8.10 — varchar vs text)</a>.</li>
+      <li>Исходный код PostgreSQL, базовый коммит
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/namespace.c#L638">src/backend/catalog/namespace.c#L638</a>
+        (сообщение «relation ... does not exist», функция
+        <code>RangeVarGetRelidExtended</code>).</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 5.2
+        (создание и удаление таблиц).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

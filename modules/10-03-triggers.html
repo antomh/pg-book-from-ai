@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 10.3. Триггеры: реакция на изменения — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="10-03-triggers">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m10">Модуль 10. Серверное программирование</a> /
+    <span aria-current="page">Глава 10.3. Триггеры: реакция на изменения</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 10.3. Триггеры: реакция на изменения</h1>
+    <p class="chapter-meta">Уровень: J+ · узел карты тем: T48 · PostgreSQL 17.11</p>
+
+    <h2>Кто понизил рейтинг?</h2>
+    <p>Рейтинг книги в читательском дневнике изменился с 5 на 1.
+    Подозреваемый — приложение, но приложение обновлялось трижды
+    за неделю, а заходили в базу ещё и через psql, и через скрипт
+    миграции. Лог изменений в приложении не спасает: он пишет
+    только то, что видит само приложение. Нужна запись в самой
+    базе данных — автоматическая, при любом UPDATE. Для этого в
+    SQL есть триггеры.</p>
+
+    <h2>Что такое триггер</h2>
+    <p>Определение из 37.1 Overview of Trigger Behavior
+    (<a href="https://www.postgresql.org/docs/17/trigger-definition.html">/docs/17/trigger-definition.html</a>,
+    перевод дословный): «триггер — это спецификация, что база
+    данных должна автоматически выполнять определённую функцию
+    всякий раз, когда выполняется определённый тип операции.
+    Триггеры могут быть прикреплены к таблицам..., представлениям
+    и сторонним таблицам. На таблицах триггеры могут быть
+    определены для выполнения до или после любой операции
+    INSERT, UPDATE или DELETE, либо один раз на каждую
+    изменённую строку, либо один раз на SQL-оператор». Классификация
+    оттуда же: триггеры «классифицируются в зависимости от того,
+    срабатывают ли они до, после или вместо операции» — BEFORE,
+    AFTER и INSTEAD OF (последние — только для представлений,
+    глава 4.4); «строчные BEFORE-триггеры срабатывают
+    непосредственно перед обработкой конкретной строки, тогда
+    как строчные AFTER-триггеры срабатывают в конце оператора
+    (но до строчных... то есть до statement-level AFTER-триггеров)».
+    Важная деталь про пустые операторы: «оператор, затрагивающий
+    ноль строк, всё равно приведёт к выполнению применимых
+    триггеров уровня оператора». И правило порядка: «если для
+    одного события на одном отношении определено более одного
+    триггера, триггеры будут срабатывать в алфавитном порядке
+    по имени».</p>
+    <p>Пометка: триггеры есть и в стандарте SQL (Silberschatz,
+    § 5.3), но конкретный синтаксис <code>CREATE TRIGGER</code> — диалект
+    PostgreSQL.</p>
+
+    <h2>Аудит изменения рейтинга</h2>
+    <p>Сначала таблица журнала (GENERATED IDENTITY — глава 4.6,
+    timestamptz — глава 3.2):</p>
+
+    <pre><code class="language-sql">CREATE TABLE review_rating_log (
+    log_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    review_id   int NOT NULL REFERENCES reviews(review_id),
+    old_rating  smallint,
+    new_rating  smallint,
+    changed_at  timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+
+    <p>Дальше — особенность PostgreSQL, отличающая его от
+    учебников: «триггерная функция должна быть определена до
+    того, как сам триггер может быть создан. Триггерная функция
+    должна быть объявлена как функция без аргументов, возвращающая
+    тип trigger» (37.1). То есть нужны два объекта: функция
+    (что делать) и триггер (когда и на какой таблице). Функция
+    пишется на PL/pgSQL из главы 10.2 и получает строки NEW и
+    OLD:</p>
+
+    <pre><code class="language-sql">CREATE FUNCTION log_rating_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO review_rating_log (review_id, old_rating, new_rating)
+    VALUES (NEW.review_id, OLD.rating, NEW.rating);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER reviews_rating_audit
+AFTER UPDATE ON reviews
+FOR EACH ROW
+WHEN (OLD.rating IS DISTINCT FROM NEW.rating)
+EXECUTE FUNCTION log_rating_change();</code></pre>
+
+    <p>Разбор. <code>AFTER UPDATE ... FOR EACH ROW</code> — функция
+    сработает после каждой изменённой строки UPDATE. <code>WHEN
+    (OLD.rating IS DISTINCT FROM NEW.rating)</code> — фильтр срабатывания:
+    «определение триггера может также задать булево условие
+    WHEN, которое будет проверяться, чтобы определить, должен
+    ли триггер сработать. В строчных триггерах условие WHEN
+    может исследовать старые и/или новые значения колонок
+    строки» (37.1); предикат <code>IS DISTINCT FROM</code> взят из главы
+    2.1 — он честно сравнивает и NULL. <code>RETURN NEW;</code> для
+    AFTER-триггера формальность: «возвращаемое значение
+    игнорируется для строчных триггеров, срабатывающих после
+    операции, так что они могут возвращать NULL» (37.1) — но
+    вернуть строку безопасно и в BEFORE. Проверяем:</p>
+
+    <pre><code class="language-sql">UPDATE reviews SET rating = 1 WHERE review_id = 3;
+SELECT log_id, review_id, old_rating, new_rating, changed_at
+FROM review_rating_log;
+
+UPDATE reviews SET rating = 1 WHERE review_id = 3;
+SELECT count(*) FROM review_rating_log;</code></pre>
+
+    <pre class="sample-output">UPDATE 1
+ log_id | review_id | old_rating | new_rating |          changed_at
+--------+-----------+------------+------------+------------------------------
+      1 |         3 |          4 |          1 | 2025-12-30 12:04:11.30973+03
+(1 row)
+
+UPDATE 1
+ count
+-------
+     1
+(1 row)</pre>
+
+    <p>Что выведено и почему (время будет вашим): первый UPDATE
+    изменил рейтинг отзыва 3 с 4 на 1 (4 — оценка этой книги
+    из главы 2.8, отзыв нигде не менялся) — сработало условие
+    WHEN, в журнал
+    попала строка со старым и новым значением. Второй UPDATE
+    записал то же самое значение 1 — строка в <code>reviews</code>
+    «обновилась» (UPDATE 1), но условие <code>OLD.rating IS DISTINCT
+    FROM NEW.rating</code> ложно, триггер не сработал, счётчик журнала
+    не вырос. Значение NULL в old_rating/new_rating появилось бы
+    при изменении с/на NULL — обычное сравнение <code>&lt;&gt;</code> здесь бы
+    ошиблось, <code>IS DISTINCT FROM</code> — нет (глава 2.1).</p>
+
+    <h2>BEFORE: право менять и отменять</h2>
+    <p>BEFORE-триггеры сильнее: они видят строку до записи и
+    могут её изменить или отменить операцию. «В случае BEFORE-
+    и INSTEAD OF-триггеров возможно-изменённая строка,
+    возвращённая каждым триггером, становится входом для
+    следующего триггера. Если любой BEFORE- или INSTEAD OF-
+    триггер возвращает NULL, операция отменяется для этой
+    строки, и последующие триггеры не срабатывают (для этой
+    строки)» (37.1). Практические следствия: нормализация
+    данных в NEW (например, <code>NEW.rating := LEAST(NEW.rating,
+    5)</code>), тихий пропуск отдельных строк через <code>RETURN NULL</code>.
+    Мы уже встречали триггеры без объявления: каскадные
+    действия ограничения внешнего ключа из главы 4.2 внутри
+    устроены как триггеры — файл
+    <code>src/backend/utils/adt/ri_triggers.c</code> так и
+    назван: «общие триггерные процедуры для проверок ограничений
+    ссылочной целостности» (шапка, строки 3–5); в каталоге
+    <code>pg_trigger</code> системные триггеры помечены полем <code>tgisinternal</code>
+    («trigger is system-generated», pg_trigger.h, строка 47).</p>
+
+    <h2>Как это исполняется</h2>
+    <p>Создание: <code>CREATE TRIGGER</code> обрабатывает <code>CreateTrigger</code> в
+    <code>src/backend/commands/trigger.c</code> (строка 159 на
+    коммите <code>083ac033419f690758508e08c1736089384bbee8</code>;
+    расширенный вариант с условием срабатывания —
+    <code>CreateTriggerFiringOn</code>, строка 176) и пишет строку в системный
+    каталог <code>pg_trigger</code>: <code>tgrelid</code> — «таблица, к которой
+    прикреплён триггер» (строка 37), <code>tgname</code> (41), <code>tgfoid</code> —
+    «OID функции, которая будет вызвана» (42), <code>tgtype</code> —
+    «BEFORE/AFTER/INSTEAD, UPDATE/DELETE/INSERT, ROW/STATEMENT»
+    (43), а условие WHEN — в <code>tgqual</code> («выражение WHEN, или
+    NULL, если его нет», строка 69); каталог <code>CATALOG(pg_trigger,
+    2620, ...)</code> объявлен в <code>src/include/catalog/pg_trigger.h</code>
+    (строка 34). Исполнение: при каждом UPDATE исполнитель
+    вызывает строчные BEFORE-триггеры через <code>ExecBRUpdateTriggers</code>
+    (trigger.c, строка 3152) до записи строки. AFTER-триггеры
+    устроены иначе: «строчные AFTER-триггеры срабатывают в конце
+    оператора» (37.1), и в коде это очередь событий — события
+    накапливаются при обработке строк и запускаются функцией
+    <code>afterTriggerInvokeEvents</code> (строка 4703) из <code>AfterTriggerEndQuery</code>
+    (строка 5141), когда оператор завершает работу. Отсюда
+    важное следствие для логов: если AFTER-триггер упадёт с
+    ошибкой, весь оператор откатится, потому что «триггер
+    выполняется как часть той же транзакции, что и оператор,
+    который его вызвал, так что если либо оператор, либо триггер
+    вызовет ошибку, эффекты обоих будут откачены» (37.1) —
+    глава 6.1 в действии. Плата за автоматизм: триггер
+    срабатывает на каждый UPDATE, включая массовые, — при
+    миллионах строк журнал растёт так же массово.</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Триггеры — концепция стандарта SQL: Silberschatz (7-е изд.,
+    гл. 5 Advanced SQL, § 5.3 Triggers, с. 206) определяет их
+    как операторы, автоматически выполняемые как побочный эффект
+    модификации базы данных, и разбирает классические применения:
+    аудит, поддержка производных значений, целостность. Раздел
+    37.1 — спецификация PostgreSQL тех же идей; отличие
+    в том, что триггерная функция у PostgreSQL — отдельный
+    переиспользуемый объект, а не встроенный блок CREATE TRIGGER.
+    Связь с остальной книгой: условие WHEN — обычное булево
+    выражение (глава 2.1), тело — PL/pgSQL (глава 10.2),
+    журнал — таблица с IDENTITY (глава 4.6), атомарность
+    вместе с оператором — транзакции (глава 6.1).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем AFTER ... FOR EACH ROW отличается
+      от BEFORE ... FOR EACH ROW по моменту срабатывания и
+      возможностям?</summary>
+      <p><b>Ответ.</b> «Строчные BEFORE-триггеры срабатывают
+      непосредственно перед обработкой конкретной строки, тогда
+      как строчные AFTER-триггеры срабатывают в конце оператора
+      (но до statement-level AFTER-триггеров)» (37.1). BEFORE
+      может менять строку («возможно-изменённая строка,
+      возвращённая каждым триггером, становится входом для
+      следующего») и отменять операцию («если любой BEFORE- или
+      INSTEAD OF-триггер возвращает NULL, операция отменяется
+      для этой строки», 37.1). AFTER подходит для журналирования:
+      строка уже точно изменена.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Почему в условии WHEN используется
+      IS DISTINCT FROM, а не &lt;&gt;? Что будет, если заменить?</summary>
+      <p><b>Ответ.</b> <code>IS DISTINCT FROM</code> (глава 2.1) даёт
+      корректное сравнение при NULL: если старое или новое
+      значение — NULL, <code>OLD.rating &lt;&gt; NEW.rating</code> вернёт NULL
+      (трёхзначная логика SQL, глава 2.1), условие не сработает,
+      и изменение с NULL или на NULL не попадёт в журнал.
+      <code>IS DISTINCT FROM</code> в таких случаях возвращает true —
+      изменение фиксируется.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Триггерная функция упала с ошибкой
+      во время UPDATE 500 строк. Что произойдёт с журналом,
+      с таблицей и почему?</summary>
+      <p><b>Ответ.</b> Откатится всё: «триггер выполняется как
+      часть той же транзакции, что и оператор, который его
+      вызвал, так что если либо оператор, либо триггер вызовет
+      ошибку, эффекты обоих будут откачены» (37.1). Ни
+      изменения строк, ни вставки в журнал не останутся —
+      атомарность транзакции из главы 6.1 распространяется и
+      на триггерные эффекты.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="10-02-plpgsql.html">← Предыдущая: 10.2. PL/pgSQL: логика на сервере</a>
+      <a class="next" href="10-04-procedures-call.html">Следующая: 10.4. Процедуры и CALL →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/trigger-definition.html">Overview of Trigger Behavior (37.1: определение, BEFORE/AFTER, ROW/STATEMENT, WHEN, порядок, атомарность с транзакцией)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createtrigger.html">CREATE TRIGGER</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/trigger.c">src/backend/commands/trigger.c</a>
+        (<code>CreateTrigger</code> L159, <code>CreateTriggerFiringOn</code> L176, <code>ExecBRUpdateTriggers</code> L3152, <code>afterTriggerInvokeEvents</code> L4703, <code>AfterTriggerEndQuery</code> L5141),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_trigger.h">src/include/catalog/pg_trigger.h</a>
+        (CATALOG(pg_trigger) L34, tgrelid L37, tgname L41, tgfoid L42, tgtype L43, tgisinternal L47, tgqual L69),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/ri_triggers.c">src/backend/utils/adt/ri_triggers.c</a>
+        («Generic trigger procedures for referential integrity constraint checks», шапка L3–6).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 5 Advanced SQL, § 5.3 Triggers (с. 206).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

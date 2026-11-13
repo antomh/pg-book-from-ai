@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 11.1. Роли, привилегии, владение — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="11-01-roles-privileges">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m11">Модуль 11. Безопасность разработчика</a> /
+    <span aria-current="page">Глава 11.1. Роли, привилегии, владение</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 11.1. Роли, привилегии, владение</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T50 · PostgreSQL 17.11</p>
+
+    <h2>Стажёр с паролем</h2>
+    <p>В команде появился стажёр, и ему нужен доступ к базе
+    читательского дневника. Пока все подключались одним
+    суперпользователем — так работало, пока «все» означало одного
+    человека. Теперь вопросы: как завести отдельную учётную
+    запись, как дать ей ровно те права, что нужны для чтения
+    отзывов, и почему нельзя просто раздать всем пароль от
+    <code>postgres</code>. Глава отвечает на них — и вводит модель прав
+    PostgreSQL целиком: роли, привилегии, владение.</p>
+
+    <h2>Роль: и пользователь, и группа</h2>
+    <p>В PostgreSQL нет отдельных «пользователей» и «групп».
+    Из главы 21 Database Roles
+    (<a href="https://www.postgresql.org/docs/17/user-manag.html">/docs/17/user-manag.html</a>,
+    перевод дословный): «роль может рассматриваться либо как
+    пользователь базы данных, либо как группа пользователей базы
+    данных — в зависимости от настройки роли. Роли могут владеть
+    объектами базы данных (например, таблицами и функциями) и
+    могут назначать привилегии на эти объекты другим ролям,
+    контролируя, кто имеет доступ к каким объектам... Концепция
+    ролей поглощает концепции «пользователей» и «групп». В
+    версиях PostgreSQL до 8.1 пользователи и группы были
+    разными видами сущностей, но теперь есть только роли.
+    Любая роль может действовать как пользователь, как группа
+    или как обе». Где живут роли: «роли базы данных глобальны
+    для всей инсталляции кластера (а не отдельно для каждой
+    базы)» (21.1
+    <a href="https://www.postgresql.org/docs/17/database-roles.html">/docs/17/database-roles.html</a>).
+    Посмотреть их можно через каталог: «чтобы определить набор
+    существующих ролей, изучите системный каталог pg_roles:
+    SELECT rolname FROM pg_roles; или чтобы увидеть только
+    способных входить в систему: SELECT rolname FROM pg_roles
+    WHERE rolcanlogin» (21.1) — представление <code>pg_roles</code> вы
+    уже встречали в главе 1.3.</p>
+    <p>Атрибуты роли определяют, чем она может быть. Из 21.2
+    Role Attributes
+    (<a href="https://www.postgresql.org/docs/17/role-attributes.html">/docs/17/role-attributes.html</a>):
+    «только роли с атрибутом LOGIN могут использоваться как
+    начальное имя роли для соединения с базой данных. Роль с
+    атрибутом LOGIN может считаться тем же, что «пользователь
+    базы данных». Чтобы создать роль с правом входа, используйте
+    любое из: CREATE ROLE имя LOGIN; CREATE USER имя; (CREATE
+    USER эквивалентен CREATE ROLE, за исключением того, что
+    CREATE USER по умолчанию включает LOGIN, а CREATE ROLE —
+    нет)». И главное предостережение: «суперпользователь базы
+    данных обходит все проверки прав, кроме права входа. Это
+    опасная привилегия, и её не следует использовать
+    беспечно; лучше выполнять большую часть работы ролью, не
+    являющейся суперпользователем» (21.2). Заводим роль
+    приложения — читателя со стажёрскими задачами:</p>
+
+    <pre><code class="language-sql">CREATE ROLE app_reader LOGIN PASSWORD 'learn-sql-11';</code></pre>
+
+    <p class="note">Пароль в команде — для учебного примера; в
+    реальности пароли не пишут в скриптах (они попадают в
+    историю shell и в <code>~/.psql_history</code>) и не хранят в
+    открытом виде — см. методы аутентификации в
+    <a href="https://www.postgresql.org/docs/17/client-authentication.html">части IV документации</a>
+    (эксплуатационная тема, вне рамок учебника).</p>
+
+    <h2>Привилегии: что можно делать с объектом</h2>
+    <p>Теперь роль есть, но прав у неё никаких. Из 5.8
+    Privileges
+    (<a href="https://www.postgresql.org/docs/17/ddl-priv.html">/docs/17/ddl-priv.html</a>,
+    далее дословно): «когда объект создаётся, ему назначается
+    владелец. Владелец — обычно роль, выполнившая оператор
+    создания. Для большинства видов объектов начальное
+    состояние таково, что только владелец (или суперпользователь)
+    может делать с объектом что-либо. Чтобы позволить другим
+    ролям использовать его, привилегии должны быть выданы.
+    Существуют разные виды привилегий: SELECT, INSERT, UPDATE,
+    DELETE, TRUNCATE, REFERENCES, TRIGGER, CREATE, CONNECT,
+    TEMPORARY, EXECUTE, USAGE, SET, ALTER SYSTEM и MAINTAIN».
+    Как видно, таблицы из главы 4.1 вы создавали владельцем —
+    и только владелец мог их читать. Особое правило: «право
+    изменять или уничтожать объект присуще владению объектом
+    и не может быть выдано или отозвано само по себе» — то
+    есть <code>GRANT UPDATE</code> не даёт права <code>DROP TABLE</code>. Выдаём
+    права на чтение и добавление отзывов:</p>
+
+    <pre><code class="language-sql">GRANT USAGE ON SCHEMA public TO app_reader;
+GRANT SELECT, INSERT ON reviews TO app_reader;
+
+SELECT has_table_privilege('app_reader', 'reviews', 'INSERT') AS can_insert,
+       has_table_privilege('app_reader', 'reviews', 'UPDATE')  AS can_update;</code></pre>
+
+    <pre class="sample-output">GRANT
+GRANT
+
+ can_insert | can_update
+-------------+------------
+ t           | f
+(1 row)</pre>
+
+    <p>Что выведено и почему: <code>GRANT</code> выдаёт привилегии,
+    функция <code>has_table_privilege(user, table, privilege)</code>
+    (9.27
+    <a href="https://www.postgresql.org/docs/17/functions-info.html">/docs/17/functions-info.html</a>)
+    проверяет их без подключения другой сессией: INSERT
+    выдан, UPDATE — нет. <code>USAGE ON SCHEMA</code> нужна, потому что
+    таблица лежит в схеме (глава 4.5): «для схем [USAGE]
+    позволяет доступ к объектам, содержащимся в схеме (при
+    условии, что требования к привилегиям самих объектов также
+    выполнены). По сути это позволяет получателю «находить»
+    объекты внутри схемы» (5.8). Проверка «в бою» — из
+    командной строки, как в главе 1.2:</p>
+
+    <pre><code class="language-shell">psql -U app_reader -d bookshelf -c "SELECT count(*) FROM reviews;"</code></pre>
+
+    <pre class="sample-output">psql (17.11)
+Password for user app_reader:
+ count
+-------
+    13
+(1 row)</pre>
+
+    <pre><code class="language-shell">psql -U app_reader -d bookshelf -c "UPDATE reviews SET rating = 5;"</code></pre>
+
+    <pre class="sample-output">psql (17.11)
+Password for user app_reader:
+ERROR:  permission denied for table reviews</pre>
+
+    <p>Что выведено и почему: <code>SELECT</code> прошёл — привилегия
+    SELECT выдана; число 13 — живые отзывы, накопленные к этому
+    моменту (главы 2.8, 4.4, 6.3–6.4, 8.1 и 10.2: мёртвые
+    версии из главы 6.4 SELECT не видит). <code>UPDATE</code> отклонён с ошибкой «permission
+    denied for table reviews» — текст ошибки формирует
+    <code>aclcheck_error</code> в
+    <code>src/backend/catalog/aclchk.c</code> (функция — строка
+    2705, сообщение «permission denied for table %s» — строка
+    2804 на коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>).
+    Прежде чем сервер выполнит оператор, он проверяет ACL —
+    список управления доступом; для таблиц он хранится в
+    колонке <code>relacl</code> (<code>aclitem[]</code>) каталога <code>pg_class</code>
+    (src/include/catalog/pg_class.h, строка 134), а проверяет
+    его функция <code>pg_class_aclcheck</code> (aclchk.c, строка 4096),
+    которая читает ACL и возвращает ACLCHECK_OK либо
+    ACLCHECK_NO_PRIV — по последнему и поднимается показанная
+    ошибка.</p>
+
+    <h2>PUBLIC, WITH GRANT OPTION и отзыв прав</h2>
+    <p>Два уточнения к GRANT. Первое: «специальное имя роли
+    PUBLIC можно использовать, чтобы выдать привилегию каждой
+    роли в системе» (5.8) — удобно для справочных таблиц,
+    опасно для рабочих. Второе: «обычно только владелец
+    объекта (или суперпользователь) может выдавать и отзывать
+    привилегии на объект. Однако можно выдать привилегию «с
+    опцией выдачи» (with grant option), которая даёт получателю
+    право выдавать её в свою очередь другим» (5.8). Отзыв —
+    REVOKE: «чтобы отозвать ранее выданную привилегию,
+    используйте подходяще названную команду REVOKE: REVOKE
+    ALL ON accounts FROM PUBLIC» (5.8); то же в синтаксисе
+    REVOKE для нашей роли — <code>REVOKE INSERT ON reviews FROM
+    app_reader;</code>. Про кадровые изменения: владение переносится
+    командой <code>ALTER TABLE ... OWNER TO ...</code> (5.8), а удалить
+    роль, владеющую объектами, просто так нельзя: «любые
+    объекты, принадлежащие роли, должны быть сначала удалены
+    или переприписаны другим владельцам; и любые права,
+    выданные роли, должны быть отозваны» (21.4 Dropping Roles
+    <a href="https://www.postgresql.org/docs/17/role-removal.html">/docs/17/role-removal.html</a>).</p>
+
+    <h2>Зачем отдельная роль приложения</h2>
+    <p>Сведём принципы, которые дают эти механизмы. Приложение
+    подключается своей ролью (<code>app_reader</code>), люди — своими;
+    таблицами владеет третья, «хозяйская» роль. Тогда: ротация
+    людей не трогает объекты (DROP ROLE человека не требует
+    переприписи таблиц — 21.); утечка пароля приложения даёт
+    минимум прав (минимальные привилегии — только то, что
+    нужно коду); в <code>pg_stat_activity</code> из главы 7.1 видно,
+    какая роль выполняет запрос, — виновник медленных
+    запросов находится сразу. Где это хранится: роли — в
+    каталоге <code>pg_authid</code> (общем для кластера; поля <code>rolname</code>
+    — «имя роли» — строка 34, <code>rolsuper</code> — «читать это поле
+    только через superuser()» — строка 35, <code>rolcanlogin</code> —
+    «разрешено ли входить как пользователь сессии» — строка
+    39, <code>rolpassword</code> — «пароль, если есть» — строка 46;
+    src/include/catalog/pg_authid.h, CATALOG(pg_authid) —
+    строка 31), команду CREATE ROLE обрабатывает <code>CreateRole</code>
+    (src/backend/commands/user.c, строка 132).</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Разграничение доступа — часть теории баз данных:
+    Silberschatz (7-е изд., гл. 4 Intermediate SQL, § 4.7
+    Authorization, с. 165) вводит именно эту модель —
+    привилегии (authorization) на уровне объектов, роли
+    (вместо пользователей и групп), GRANT/REVOKE и владение
+    как источник прав. PostgreSQL реализует её «ролями,
+    поглощающими пользователей и группы» (глава 21) — та же
+    эволюция, что и в стандарте SQL; уточнения диалекта:
+    <code>ALTER SYSTEM</code>, <code>SET</code> и <code>MAINTAIN</code> в списке привилегий —
+    расширения PostgreSQL. С <code>GRANTED BY</code> тоньше: сама опция
+    есть в стандарте SQL, но там допускает только
+    <code>CURRENT_USER</code>/<code>CURRENT_ROLE</code>, а «остальные варианты
+    являются расширениями PostgreSQL» (Compatibility,
+    sql-grant). Теория
+    доступа на уровне строк (row-level) в Silberschatz не
+    покрывается — это предмет следующей главы (и пометка
+    карты тем: RLS покрывается только документацией).</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем CREATE ROLE отличается от CREATE
+      USER, и что означает атрибут LOGIN?</summary>
+      <p><b>Ответ.</b> «CREATE USER эквивалентен CREATE ROLE,
+      за исключением того, что CREATE USER по умолчанию
+      включает LOGIN, а CREATE ROLE — нет» (21.2). LOGIN —
+      «только роли с атрибутом LOGIN могут использоваться как
+      начальное имя роли для соединения с базой данных;
+      роль с атрибутом LOGIN может считаться тем же, что
+      «пользователь базы данных»» (21.2). Роль без LOGIN —
+      кандидат в «группу» (глава 21: «любая роль может
+      действовать как пользователь, как группа или как обе»).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Роль имеет GRANT SELECT ON reviews, но
+      получает «permission denied» при чтении. Какие две
+      возможные причины и какая проверка локализует проблему?</summary>
+      <p><b>Ответ.</b> Причина 1: нет USAGE на схеме — «для
+      схем [USAGE] позволяет доступ к объектам, содержащимся
+      в схеме» (5.8). Причина 2: SELECT выдан не на ту таблицу
+      (другая схема — глава 4.5) или уже отозван. Локализация:
+      <code>SELECT has_table_privilege(&#x27;роль&#x27;, &#x27;схема.таблица&#x27;,
+      &#x27;SELECT&#x27;)</code> (9.27) — покажет фактическое состояние;
+      текст ошибки «permission denied for table ...» приходит
+      из <code>aclcheck_error</code> (aclchk.c L2705), когда
+      <code>pg_class_aclcheck</code> вернул отказ.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему нельзя выдать право DROP TABLE
+      через GRANT, и что нужно сделать перед DROP ROLE роли,
+      владеющей таблицей?</summary>
+      <p><b>Ответ.</b> «Право изменять или уничтожать объект
+      присуще владению объектом и не может быть выдано или
+      отозвано само по себе» (5.8) — уничтожение доступно
+      только владельцу (или суперпользователю, который
+      «обходит все проверки прав» — 21.2). Перед DROP ROLE:
+      «любые объекты, принадлежащие роли, должны быть сначала
+      удалены или переприписаны другим владельцам; и любые
+      права, выданные роли, должны быть отозваны» (21.4);
+      переприись — <code>ALTER TABLE ... OWNER TO</code> (5.8) или
+      REASSIGN OWNED.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="10-04-procedures-call.html">← Предыдущая: 10.4. Процедуры и CALL</a>
+      <a class="next" href="11-02-row-level-security.html">Следующая: 11.2. Row-Level Security →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/user-manag.html">Database Roles (гл. 21)</a>,
+        <a href="https://www.postgresql.org/docs/17/database-roles.html">Database Roles (21.1 — pg_roles, глобальность ролей)</a>,
+        <a href="https://www.postgresql.org/docs/17/role-attributes.html">Role Attributes (21.2 — LOGIN, SUPERUSER, CREATE USER)</a>,
+        <a href="https://www.postgresql.org/docs/17/role-removal.html">Dropping Roles (21.4)</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-priv.html">Privileges (5.8 — владение, виды привилегий, PUBLIC, WITH GRANT OPTION, USAGE на схемах)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-grant.html">GRANT</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-revoke.html">REVOKE</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-info.html">System Information Functions (9.27 — has_table_privilege)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/commands/user.c">src/backend/commands/user.c</a>
+        (<code>CreateRole</code> L132),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_authid.h">src/include/catalog/pg_authid.h</a>
+        (CATALOG(pg_authid) L31, rolname L34, rolsuper L35, rolcanlogin L39, rolpassword L46),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/include/catalog/pg_class.h">src/include/catalog/pg_class.h</a>
+        (relacl L134),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/catalog/aclchk.c">src/backend/catalog/aclchk.c</a>
+        (<code>pg_class_aclcheck</code> L4096, <code>aclcheck_error</code> L2705, «permission denied for table %s» L2804),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/utils/adt/acl.c">src/backend/utils/adt/acl.c</a>
+        (SQL-функция has_table_privilege — варианты L1895–2022).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 4 Intermediate SQL, § 4.7 Authorization (с. 165).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

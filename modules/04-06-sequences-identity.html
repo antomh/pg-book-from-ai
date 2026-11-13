@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 4.6. Последовательности — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="04-06-sequences-identity">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m04">Модуль 4. DDL и проектирование</a> /
+    <span aria-current="page">Глава 4.6. Последовательности: SERIAL и GENERATED AS IDENTITY</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 4.6. Последовательности: SERIAL и GENERATED AS IDENTITY</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T23 · PostgreSQL 17.11</p>
+
+    <h2>id: 1, 2, 5. Кто съел 3 и 4?</h2>
+    <p>В логе приложения записи сессий чтения получают номера 1, 2,
+    5, 6... Никто не удалял строки. Разработчик подозревает баг и
+    тратит день на поиски «потерянных» id. На самом деле поведение
+    документировано: номера раздаёт генератор, который не умеет
+    брать обратно. Глава разбирает этот механизм —
+    последовательности, — а заодно главный выбор проектировщика
+    суррогатного ключа: <code>serial</code> (расширение PostgreSQL) против
+    <code>GENERATED AS IDENTITY</code> (стандарт SQL).</p>
+
+    <h2>Что такое последовательность</h2>
+    <p>«CREATE SEQUENCE создаёт новый генератор порядковых номеров.
+    Это включает создание и инициализацию новой специальной
+    однорядной таблицы с заданным именем» —
+    (<a href="https://www.postgresql.org/docs/17/sql-createsequence.html">/docs/17/sql-createsequence.html</a>,
+    перевод дословный). То есть последовательность — самостоятельный
+    объект базы, «специальная однорядная таблица»; в системном
+    каталоге она видна как отношение (глава 1.3). Работа с ней —
+    функции из 9.17
+    (<a href="https://www.postgresql.org/docs/17/functions-sequence.html">/docs/17/functions-sequence.html</a>):</p>
+    <ul>
+      <li><code>nextval(regclass) → bigint</code> — «продвигает объект
+        последовательности к следующему значению и возвращает его.
+        Это делается атомарно: даже если несколько сеансов выполняют
+        nextval конкурентно, каждый безопасно получит отличное
+        значение последовательности»;</li>
+      <li><code>currval(regclass)</code> — «значение, полученное последним
+        вызовом nextval для этой последовательности в текущем сеансе»
+        (и «ошибка выдаётся, если nextval никогда не вызывался для
+        этой последовательности в текущем сеансе»);</li>
+      <li><code>setval(regclass, bigint)</code> — ручная установка счётчика,
+        «устанавливает текущее значение последовательности».</li>
+    </ul>
+    <p>Диапазон — как у bigint: «последовательности основаны на
+    арифметике bigint, поэтому диапазон не может превышать диапазон
+    восьмибайтового целого» (Notes, CREATE SEQUENCE).</p>
+
+    <h2>serial: «не настоящий тип»</h2>
+    <p>Раздел 8.1.4 Serial Types
+    (<a href="https://www.postgresql.org/docs/17/datatype-numeric.html">/docs/17/datatype-numeric.html</a>)
+    начинается с важной пометки: «этот раздел описывает специфичный
+    для PostgreSQL способ создания автоинкрементного столбца.
+    Другой способ — использовать стандартную для SQL возможность
+    identity-столбцов». Само определение: «типы данных smallserial,
+    serial и bigserial — не настоящие типы, а лишь нотационное
+    удобство для создания столбцов уникальных идентификаторов».
+    Удобство разворачивается в три команды дословно:</p>
+
+    <pre><code class="language-sql">-- CREATE TABLE t (id serial); эквивалентно:
+CREATE SEQUENCE t_id_seq AS integer;
+CREATE TABLE t (
+    id integer NOT NULL DEFAULT nextval('t_id_seq')
+);
+ALTER SEQUENCE t_id_seq OWNED BY t.id;</code></pre>
+
+    <p>Отсюда видны три следствия. Первое: <code>serial</code> — это обычный
+    <code>integer NOT NULL DEFAULT nextval(...)</code>, и «в большинстве
+    случаев вы захотели бы также прикрепить ограничение UNIQUE или
+    PRIMARY KEY, чтобы предотвратить случайную вставку дубликатов,
+    но это не делается автоматически». Второе: последовательность
+    помечается «принадлежащей» столбцу («owned by»), «поэтому она
+    будет удалена при удалении столбца или таблицы». Третье: DEFAULT
+    — это выражение, значит конкретно у serial значения id при
+    вставке берутся из nextval (глава 4.1 про DEFAULT).</p>
+
+    <h2>Откуда дыры</h2>
+    <p>Формулировка из 8.1.4 дословно: «поскольку smallserial,
+    serial и bigserial реализованы с использованием
+    последовательностей, в последовательности значений, появляющихся
+    в столбце, могут быть "дыры" или пропуски, даже если строки
+    никогда не удалялись. Значение, выделенное из
+    последовательности, всё равно "расходуется", даже если строка с
+    этим значением никогда не будет успешно вставлена в столбец
+    таблицы. Это может произойти, например, если вставляющая
+    транзакция откатывается». Причина глубже — в Notes к CREATE
+    SEQUENCE: «поскольку вызовы nextval и setval никогда не
+    откатываются, объекты последовательности нельзя использовать,
+    если требуется "бесшовное" (gapless) назначение номеров».
+    Демонстрация на identity-столбце (см. ниже) — с явным
+    BEGIN/ROLLBACK:</p>
+
+    <pre><code class="language-sql">CREATE TABLE reading_sessions (
+    session_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    reader_id  integer NOT NULL REFERENCES readers,
+    book_id    integer NOT NULL REFERENCES books,
+    started_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO reading_sessions (reader_id, book_id) VALUES (1, 1);
+
+BEGIN;
+INSERT INTO reading_sessions (reader_id, book_id) VALUES (2, 4);
+ROLLBACK;
+
+INSERT INTO reading_sessions (reader_id, book_id) VALUES (1, 1);
+
+SELECT session_id, reader_id, book_id FROM reading_sessions;</code></pre>
+
+    <pre class="sample-output"> session_id | reader_id | book_id
+------------+-----------+---------
+          1 |         1 |       1
+          3 |         1 |       1
+(2 rows)</pre>
+
+    <p>Что выведено и почему: первая вставка получила session_id 1
+    (вызов nextval при INSERT); вставка внутри транзакции
+    получила session_id 2 и откатилась вместе с транзакцией — но
+    «вызовы nextval и setval никогда не откатываются» (Notes,
+    CREATE SEQUENCE), поэтому номер 2 израсходован; последняя
+    вставка получила следующий свободный номер — 3. Строк в
+    таблице две, а счётчик последовательности показывает 3 —
+    следующий INSERT получит 4.
+    Практическое следствие: уникальность id гарантирует PRIMARY
+    KEY, а непрерывность не гарантирует никто — и для прикладных
+    ключей она не нужна.</p>
+
+    <h2>GENERATED AS IDENTITY: стандартный способ</h2>
+    <p>Identity-столбец описан в разделе 5.3
+    (<a href="https://www.postgresql.org/docs/17/ddl-identity-columns.html">/docs/17/ddl-identity-columns.html</a>):
+    «identity-столбец — это специальный столбец, генерируемый
+    автоматически из неявной последовательности. Он может
+    использоваться для генерации значений ключа». Отличия от serial
+    — в дисциплине. Вариант <code>ALWAYS</code> (как в примере выше):
+    «в команде INSERT, если выбран ALWAYS, значение, указанное
+    пользователем, принимается, только если оператор INSERT
+    указывает OVERRIDING SYSTEM VALUE». Вариант <code>BY DEFAULT</code>:
+    «тогда значение, указанное пользователем, имеет приоритет» —
+    поведение ближе к обычному DEFAULT из главы 4.1. Общее для
+    обоих: «identity-столбец автоматически помечается как NOT NULL.
+    Однако identity-столбец не гарантирует уникальность...
+    Уникальность нужно обеспечивать ограничением PRIMARY KEY или
+    UNIQUE».</p>
+    <p>Что выбрать в 2026 году: <code>GENERATED ... AS IDENTITY</code>.
+    Аргументы: это «стандартная для SQL возможность» (8.1.4),
+    семантика владения встроена в таблицу (неявная
+    последовательность — часть определения столбца, а не отдельный
+    объект с OWNED BY), а запрет ручной вставки при ALWAYS
+    защищает от случайной порчи нумерации. <code>serial</code> встречается в
+    существующих схемах повсеместно и потому должен читаться
+    уверенно — но в новых миграциях стандартный вариант
+    предпочтителен.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Почему после ROLLBACK транзакции со
+      INSERT следующий INSERT получает id через пропуск, и где это
+      документировано?</summary>
+      <p><b>Ответ.</b> Значение уже выделено nextval, а «вызовы
+      nextval и setval никогда не откатываются» (Notes, CREATE
+      SEQUENCE); поэтому «значение, выделенное из
+      последовательности, всё равно "расходуется", даже если строка
+      с этим значением никогда не будет успешно вставлена... Это
+      может произойти, например, если вставляющая транзакция
+      откатывается» (8.1.4).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Что реально создаёт <code>id serial</code> в CREATE
+      TABLE, и какие два ограничения при этом НЕ появятся
+      автоматически?</summary>
+      <p><b>Ответ.</b> «Нотационное удобство»: CREATE SEQUENCE,
+      столбец <code>integer NOT NULL DEFAULT nextval(...)</code> и OWNED BY
+      (8.1.4). НЕ появятся: уникальность и первичный ключ — «в
+      большинстве случаев вы захотели бы также прикрепить
+      ограничение UNIQUE или PRIMARY KEY... но это не делается
+      автоматически» (там же).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Чем <code>GENERATED ALWAYS AS IDENTITY</code>
+      отличается от <code>GENERATED BY DEFAULT AS IDENTITY</code> на INSERT с
+      явным значением id?</summary>
+      <p><b>Ответ.</b> При ALWAYS «значение, указанное
+      пользователем, принимается, только если оператор INSERT
+      указывает OVERRIDING SYSTEM VALUE»; при BY DEFAULT
+      «значение, указанное пользователем, имеет приоритет» (5.3).
+      Оба варианта «автоматически помечают столбец как NOT NULL» и
+      оба не гарантируют уникальность без PRIMARY KEY/UNIQUE.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="04-05-schemas-search-path.html">← Предыдущая: 4.5. Схемы и search_path</a>
+      <a class="next" href="04-07-partitioning.html">Следующая: 4.7. Декларативное партиционирование →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/datatype-numeric.html">Serial Types (8.1.4)</a>,
+        <a href="https://www.postgresql.org/docs/17/ddl-identity-columns.html">Identity Columns (5.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-createsequence.html">CREATE SEQUENCE (Description, Notes)</a>,
+        <a href="https://www.postgresql.org/docs/17/functions-sequence.html">Sequence Manipulation Functions (9.17)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 5.1
+        (значения по умолчанию; автоинкремент).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

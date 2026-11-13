@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 9.1. Путь запроса: от текста до результата — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="09-01-query-path">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m09">Модуль 9. Планировщик и EXPLAIN</a> /
+    <span aria-current="page">Глава 9.1. Путь запроса: от текста до результата</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 9.1. Путь запроса: от текста до результата</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T41 · PostgreSQL 17.11</p>
+
+    <h2>Куда исчезает SELECT из представления</h2>
+    <p>В главе 4.4 вы создали представление <code>book_reviews</code> —
+    «виртуальную таблицу» над <code>reviews</code>, <code>books</code> и <code>authors</code>.
+    Запрос <code>SELECT * FROM book_reviews</code> возвращает строки трёх
+    таблиц, хотя самого объекта <code>book_reviews</code> в базе нет — там
+    только сохранённый SELECT. Значит, между вашим текстом и
+    чтением таблиц кто-то подставил тело представления вместо
+    его имени. Кто, в какой момент и что ещё происходит с
+    запросом по дороге? В главе 7.1 мы прошли путь запроса
+    обзорно; теперь разберём каждую станцию: разбор, семантический
+    анализ, переписывание, планирование, исполнение.</p>
+
+    <h2>Четыре станции</h2>
+    <p>Внутренний обзор (50.1
+    <a href="https://www.postgresql.org/docs/17/query-path.html">/docs/17/query-path.html</a>,
+    перевод дословный): «стадия парсера проверяет запрос,
+    переданный приложением, на корректность синтаксиса и создаёт
+    дерево запроса. Система перезаписи берёт дерево запроса,
+    созданное парсером, и ищет правила (сохранённые в системных
+    каталогах) для применения к дереву запроса. Она выполняет
+    преобразования, заданные в телах правил. Одно из применений
+    системы перезаписи — реализация представлений. Всякий раз,
+    когда выполняется запрос к представлению (то есть к
+    виртуальной таблице), система перезаписи преобразует запрос
+    пользователя к запросу, который обращается к базовым таблицам,
+    заданным в определении представления, вместо него.
+    Планировщик/оптимизатор берёт (переписанное) дерево запроса
+    и создаёт план запроса, который будет входом для исполнителя.
+    Он делает это, сначала создавая все возможные пути, ведущие
+    к тому же результату. Например, если по индексу на сканируемое
+    отношение есть два пути сканирования: простое
+    последовательное сканирование и сканирование с использованием
+    индекса. Затем оценивается стоимость выполнения каждого пути
+    и выбирается самый дешёвый. Самый дешёвый путь разворачивается
+    в полный план, который может использовать исполнитель.
+    Исполнитель рекурсивно проходит по дереву плана и извлекает
+    строки способом, представленным планом». Ответ на вопрос
+    главы: подстановку делает станция переписывания — вторая по
+    счёту.</p>
+
+    <h2>Станции на ощупь: три ошибки в трёх разных местах</h2>
+    <p>Каждую станцию можно «постучать» неправильным запросом.
+    Ошибка на станции видна по тексту сообщения:</p>
+
+    <pre><code class="language-sql">SELCT * FROM book_reviews;
+
+SELECT * FROM book_reviewz;
+
+SELECT nonexistent_col FROM book_reviews;</code></pre>
+
+    <pre class="sample-output">ERROR:  syntax error at or near "SELCT"
+LINE 1: SELCT * FROM book_reviews;
+        ^
+
+ERROR:  relation "book_reviewz" does not exist
+LINE 1: SELECT * FROM book_reviewz;
+                  ^
+
+ERROR:  column "nonexistent_col" of relation "book_reviews" does not exist
+LINE 1: SELECT nonexistent_col FROM book_reviews;</pre>
+
+    <p>Что выведено и почему: первая ошибка — грамматика:
+    сообщение «syntax error» формирует парсер (вызовы
+    <code>parser_yyerror(&quot;syntax error&quot;)</code> в грамматике
+    <code>src/backend/parser/gram.y</code> — строки 18742 и
+    18759 на базовом коммите
+    <code>083ac033419f690758508e08c1736089384bbee8</code>).
+    Вторая и третья — семантический анализ: слова распознаны,
+    но объекта (или столбца) с таким именем нет; сообщения
+    «relation ... does not exist» и «column ... does not exist»
+    выдаёт анализ имён в
+    <code>src/backend/parser/parse_relation.c</code> (строки
+    1443/1451 и 737 соответственно). Важно: обе ошибки пойманы
+    до планирования и исполнения — планировщик никогда не
+    увидел бы несуществующую таблицу. Третья ошибка — та же
+    станция анализа имён, но проверяется столбец: слова запроса
+    корректны, таблица существует, а вот столбца в ней нет.
+    Все три сообщения приходят из разных мест конвейера — по
+    тексту ошибки можно понять, как далеко запрос успел
+    пройти.</p>
+
+    <h2>Оркестратор и исполнители станций в коде</h2>
+    <p>Обработку простого запроса ведёт <code>exec_simple_query</code> в
+    <code>src/backend/tcop/postgres.c</code> (строка 1018). Она
+    вызывает по очереди: <code>pg_parse_query</code> (строка 616) — синтаксический
+    разбор в дерево, затем анализ и <code>pg_rewrite_query</code> (строка
+    809) — перезапись, затем <code>pg_plan_query</code> (строка 891) —
+    планирование. Семантический анализ превращает «сырое» дерево
+    в дерево запроса: «рекурсивно преобразует дерево разбора в
+    дерево запроса» — комментарий к <code>transformStmt</code> в
+    <code>src/backend/parser/analyze.c</code> (строки 307–309,
+    сигнатура на 311). Перезапись начинается в уже знакомом по
+    главе 4.4 месте: «Primary entry point to the query rewriter»
+    — <code>QueryRewrite</code> в
+    <code>src/backend/rewrite/rewriteHandler.c</code> (строка
+    4556). Планирование: <code>subquery_planner</code>
+    (src/backend/optimizer/plan/planner.c, строка 629) —
+    обход подзапросов и подготовка, <code>standard_planner</code>
+    (там же, строка 288) — сборка окончательного плана. Как
+    планировщик перебирает варианты, описывает README каталога
+    optimizer: «во время планирования/оптимизации мы строим
+    деревья "путей" (Path), представляющие разные способы
+    выполнения запроса. Мы выбираем самый дешёвый путь... и
+    превращаем его в план для передачи исполнителю...
+    Оптимизатор строит структуру RelOptInfo для каждого базового
+    отношения, используемого в запросе... Для каждого RelOptInfo
+    строится список путей, представляющих правдоподобные способы
+    сканирования или соединения этого отношения. Рассмотрев все
+    правдоподобные пути, выбираем самый дешёвый по оценкам
+    стоимости планировщика»
+    (<code>src/backend/optimizer/README</code>, перевод дословный).</p>
+
+    <h2>Связь с уже изученным</h2>
+    <p>Теперь узлы вашей карты смыкаются: исполнитель «рекурсивно
+    проходит по дереву плана» — это Volcano-модель «один кортеж
+    за раз» из теории обработки запросов; станции работают внутри
+    backend-процесса из главы 7.1; выбор «самого дешёвого пути» —
+    это то, что вы увидите числами в EXPLAIN (глава 9.3), а
+    «сначала создаём все возможные пути... последовательное
+    сканирование или индекс» — обещание индексов из главы 8.1.
+    Порядок станций фиксирован для каждого оператора, но
+    продумывается он на всю транзакцию: «все запросы,
+    сгенерированные строкой запроса, будут в одном и том же
+    командном блоке, если только не встретится BEGIN/COMMIT» —
+    комментарий в <code>exec_simple_query</code> (postgres.c, строки
+    1045–1050).</p>
+
+    <h2>Связь с теорией</h2>
+    <p>Станции — это классический конвейер обработки запросов из
+    учебников: Silberschatz (7-е изд., гл. 15 Query Processing:
+    § 15.1 Overview — разбор и трансляция, выбор плана, исполнение)
+    описывает те же шаги: «перед выполнением запроса система
+    должна транслировать его в форму, пригодную для обработки».
+    PostgreSQL добавляет нетипичную для учебников станцию
+    перезаписи правил (rule system) — именно она делает представления
+    «виртуальными таблицами» без копирования данных. Курс CMU
+    15-445 разбирает конвейер обработки запроса в лекциях #13–15
+    (Query Processing I–III). План как дерево операторов с
+    интерфейсом next() — модель Volcano (обзор в лекциях курса);
+    в коде это итераторы-узлы из каталога executor.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Расставьте по порядку: планирование,
+      разбор, перезапись, семантический анализ, исполнение.
+      На какой станции SELECT из представления становится
+      SELECT из таблиц?</summary>
+      <p><b>Ответ.</b> Разбор (синтаксис, gram.y) → семантический
+      анализ (<code>transformStmt</code> — имена таблиц/столбцов, типы) →
+      перезапись (<code>QueryRewrite</code>) → планирование (<code>subquery_planner</code>,
+      <code>standard_planner</code>) → исполнение. Представление подставляется
+      на станции перезаписи: «система перезаписи преобразует
+      запрос пользователя к запросу, который обращается к базовым
+      таблицам, заданным в определении представления» (50.1).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем ошибка «syntax error at or near
+      "SELCT"» отличается по моменту возникновения от «relation
+      "book_reviewz" does not exist», если оба запроса вводятся
+      в psql?</summary>
+      <p><b>Ответ.</b> Оба сообщения появляются до исполнения —
+      но на разных станциях: первая — грамматический разбор
+      (грамматика не смогла сопоставить токен SELCT, gram.y,
+      <code>parser_yyerror</code>), вторая — семантический анализ:
+      «дерево разбора рекурсивно преобразуется в дерево запроса»
+      (<code>transformStmt</code>, analyze.c), и анализ имён не нашёл
+      объект (parse_relation.c). До планировщика и исполнителя
+      запрос не доходит ни в одном случае.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Планировщик строит «все возможные пути»
+      и выбирает «самый дешёвый». Откуда он знает, какой путь
+      дешёвый, если ничего ещё не выполнял?</summary>
+      <p><b>Ответ.</b> Стоимость оценивается по модели стоимости
+      и статистике, а не по замеру: планировщик перебирает пути
+      («последовательное сканирование или сканирование с
+      использованием индекса» — 50.1) и оценивает каждый по
+      числу страниц, строк и операций — «затем оценивается
+      стоимость выполнения каждого пути, и выбирается самый
+      дешёвый» (50.1). Числа для оценки берутся из статистики
+      таблиц — тема главы 9.2; сами единицы стоимости — глава
+      9.5.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="08-04-other-index-methods.html">← Предыдущая: 8.4. Другие методы: hash, GIN, GiST, SP-GiST, BRIN</a>
+      <a class="next" href="09-02-planner-statistics.html">Следующая: 9.2. Статистика планировщика →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/query-path.html">The Path of a Query (50.1)</a>,
+        <a href="https://www.postgresql.org/docs/17/overview.html">Overview of PostgreSQL Internals (Part VII, введение)</a>.</li>
+      <li>Исходный код на коммите
+        <code>083ac033419f690758508e08c1736089384bbee8</code>:
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/tcop/postgres.c">src/backend/tcop/postgres.c</a>
+        (<code>pg_parse_query</code> L616, <code>pg_rewrite_query</code> L809, <code>pg_plan_query</code> L891, <code>exec_simple_query</code> L1018, комментарий о командном блоке L1045–1050),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/gram.y">src/backend/parser/gram.y</a>
+        (<code>parser_yyerror(&quot;syntax error&quot;)</code> L18742, L18759),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/analyze.c">src/backend/parser/analyze.c</a>
+        (<code>transformStmt</code> L311, комментарий L307–309),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/parser/parse_relation.c">src/backend/parser/parse_relation.c</a>
+        («relation ... does not exist» L1443/L1451, «column ... does not exist» L737),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/rewrite/rewriteHandler.c">src/backend/rewrite/rewriteHandler.c</a>
+        (<code>QueryRewrite</code> L4556),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/optimizer/plan/planner.c">src/backend/optimizer/plan/planner.c</a>
+        (<code>standard_planner</code> L288, <code>subquery_planner</code> L629),
+        <a href="https://github.com/postgres/postgres/blob/083ac033419f690758508e08c1736089384bbee8/src/backend/optimizer/README">src/backend/optimizer/README</a>
+        (деревья Path, RelOptInfo, выбор самого дешёвого пути).</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — гл. 15 Query Processing (§ 15.1 Overview).</li>
+      <li>Курс CMU 15-445/645, Spring 2025 — лекции #13–15 Query Processing I–III (<a href="https://15445.courses.cs.cmu.edu/spring2025/schedule.html">schedule</a>).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

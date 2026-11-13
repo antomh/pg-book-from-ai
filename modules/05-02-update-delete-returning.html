@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 5.2. UPDATE, DELETE, RETURNING — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="05-02-update-delete-returning">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m05">Модуль 5. Изменение данных</a> /
+    <span aria-current="page">Глава 5.2. UPDATE, DELETE, RETURNING</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 5.2. UPDATE, DELETE, RETURNING</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T26 · PostgreSQL 17.11</p>
+
+    <h2>Модератор против спам-бота: правка, удаление и журнал действий</h2>
+    <p>В отзывах завёлся спам-бот. Модератор должен исправить его
+    мусорные оценки, пометить часть комментариев и в итоге вычистить
+    всё, а приложению — записать в журнал, какие именно строки
+    тронуты. Делать это парой «изменил — перечитал SELECT'ом» и
+    медленно, и ненадёжно: между UPDATE и SELECT данные может
+    успеть поменять другой сеанс (подробно — модуль 6). В теории это
+    ровно операции модификации базы: в реляционной модели строки
+    выбираются предикатом, а «обновления и удаления применяются
+    ко всем строкам, удовлетворяющим предикату» (Silberschatz,
+    7-е изд., § 3.9). PostgreSQL добавляет к ним третье — предложение
+    <code>RETURNING</code>, возвращающее изменённые строки из самого
+    оператора.</p>
+
+    <h2>Декорации: спам-бот уже нагадил</h2>
+    <p>Сквозная схема учебника: <code>readers</code>, <code>books</code>, <code>reviews</code>
+    (глава 4.2). Читатель с <code>reader_id</code> 9 зарегистрировался и
+    оставил два отзыва — на «Евгений Онегин» (book_id 1, Пушкин) и
+    «Война и мир» (book_id 4, Толстой):</p>
+
+    <pre><code class="language-sql">INSERT INTO readers (reader_id, email, display_name)
+VALUES (9, 'promo@example.com', 'promo_bot');
+
+INSERT INTO reviews (review_id, reader_id, book_id, rating, comment) VALUES
+    (11, 9, 1, 1, 'Куплю диплом недорого'),
+    (12, 9, 4, 2, 'Заходи на мой сайт');</code></pre>
+
+    <pre class="sample-output">INSERT 0 1
+INSERT 0 2</pre>
+
+    <p>Что выведено и почему: два оператора — два тега команды
+    <code>INSERT 0 N</code> (глава 5.1); <code>review_id</code> 11–12 продолжают нумерацию
+    десяти существующих отзывов (восемь из главы 2.8, два из 4.4).
+    Первичный ключ у <code>readers</code> — без identity (глава 4.1), поэтому
+    <code>reader_id</code> задаём явно.</p>
+
+    <h2>UPDATE: изменить строки по условию</h2>
+    <p>Минимум из справочника
+    (<a href="https://www.postgresql.org/docs/17/sql-update.html">/docs/17/sql-update.html</a>):
+    «UPDATE изменяет значения указанных столбцов во всех строках,
+    удовлетворяющих условию. В предложении SET нужно упоминать
+    только изменяемые столбцы; столбцы, не изменённые явно,
+    сохраняют прежние значения». Условие задаётся как в SELECT
+    (глава 2.1), и надёжно адресовать одну строку можно только по
+    ключу: «только если в таблице есть первичный ключ, вы можете
+    надёжно адресовать отдельные строки условием, совпадающим с
+    первичным ключом»
+    (<a href="https://www.postgresql.org/docs/17/dml-update.html">6.2</a>).
+    Учебный «мягкий» ход модератора — поднять заниженные оценки
+    бота и сразу увидеть результат:</p>
+
+    <pre><code class="language-sql">UPDATE reviews
+SET rating = rating + 1
+WHERE reader_id = 9 AND rating &lt; 5
+RETURNING review_id, rating AS new_rating;</code></pre>
+
+    <pre class="sample-output"> review_id | new_rating
+-----------+------------
+        11 |          2
+        12 |          3
+(2 rows)</pre>
+
+    <p>Что выведено и почему: обе строки бота подошли под условие;
+    <code>RETURNING</code> вернул «новое (после обновления) значение» столбца
+    — в UPDATE «данные, доступные RETURNING, — это новое содержимое
+    изменённой строки»
+    (<a href="https://www.postgresql.org/docs/17/dml-returning.html">6.4</a>).
+    Если бы под условие не подошла ни одна строка, ошибки не было бы:
+    «обновление нуля, одной или многих строк... попытка обновления,
+    не совпавшая ни с одной строкой, не является ошибкой» (6.2), а
+    тег команды был бы <code>UPDATE 0</code>.</p>
+
+    <h2>UPDATE с данными из других таблиц</h2>
+    <p>Дальше — пометить комментарии бота, но не вручную по
+    номерам, а по свойствам книг: «существует два способа изменить
+    таблицу, используя информацию, содержащуюся в других таблицах
+    базы данных: подзапросы или указание дополнительных таблиц в
+    предложении FROM» (sql-update, Description). Прячем текст
+    отзывов на книгах Пушкина:</p>
+
+    <pre><code class="language-sql">UPDATE reviews AS r
+SET comment = '(скрыто модератором)'
+FROM books AS b
+WHERE r.book_id = b.book_id
+  AND b.author_id = 1
+  AND r.reader_id = 9
+RETURNING r.review_id, r.comment;</code></pre>
+
+    <pre class="sample-output"> review_id |       comment
+-----------+---------------------
+        11 | (скрыто модератором)
+(1 row)</pre>
+
+    <p>Что выведено и почему: у бота один отзыв на книге Пушкина
+    (review_id 11, book_id 1 — «Евгений Онегин»); строки с
+    <code>book_id</code> 4 автором 1 не обладают, поэтому не обновлены.
+    Механика FROM — из Notes справочника: «когда присутствует
+    предложение FROM, по сути происходит соединение целевой таблицы
+    с таблицами из списка from_item, и каждая строка соединения
+    представляет операцию обновления для целевой таблицы». Здесь
+    соединение идёт по <code>book_id</code> — первичному ключу <code>books</code>, то есть
+    «на каждую изменяемую строку» соединение даёт ровно одну строку.
+    Нарушать это правило нельзя: «вы должны обеспечить, чтобы
+    соединение выдавало не более одной строки для каждой
+    изменяемой строки... если это происходит [больше одной], только
+    одна строка соединения будет использована для обновления целевой
+    строки, но какая именно — не легко предсказуема» (Notes).</p>
+
+    <h2>DELETE: удалить строки по условию</h2>
+    <p>Финал зачистки. «DELETE удаляет строки, удовлетворяющие
+    предложению WHERE, из указанной таблицы»
+    (<a href="https://www.postgresql.org/docs/17/sql-delete.html">/docs/17/sql-delete.html</a>).
+    Сначала — отзыв бота на «Войне и мире», найденный через данные
+    другой таблицы. У DELETE для этого есть предложение USING —
+    «PostgreSQL позволяет ссылаться на столбцы других таблиц в
+    условии WHERE, указав другие таблицы в предложении USING...
+    Фактически здесь происходит соединение таблиц, и все успешно
+    соединённые строки помечаются к удалению» (Notes; там же
+    отмечено: «этот синтаксис не стандартен»):</p>
+
+    <pre><code class="language-sql">DELETE FROM reviews AS r
+USING books AS b
+WHERE r.book_id = b.book_id
+  AND b.author_id = 3
+  AND r.reader_id = 9
+RETURNING r.review_id;</code></pre>
+
+    <pre class="sample-output"> review_id
+-----------
+        12
+(1 row)</pre>
+
+    <p>Что выведено и почему: соединение по <code>book_id</code> оставило
+    только отзыв на «Войне и мире» (book_id 4, Толстой — author_id 3)
+    от читателя 9 — он и удалён. В DELETE «данные, доступные
+    RETURNING, — это содержимое удалённой строки» (6.4), поэтому
+    журнал получает review_id уже несуществующего отзыва. Более
+    стандартная альтернатива — подзапрос (Notes приводит именно её):
+    <code>WHERE book_id IN (SELECT book_id FROM books WHERE author_id = 3)</code>.</p>
+
+    <p>Остался один помеченный отзыв и сам аккаунт. Убираем обоих —
+    по условию на первичный ключ:</p>
+
+    <pre><code class="language-sql">DELETE FROM reviews WHERE reader_id = 9 RETURNING review_id;
+
+DELETE FROM readers WHERE reader_id = 9;</code></pre>
+
+    <pre class="sample-output"> review_id
+-----------
+        11
+(1 row)
+
+DELETE 1</pre>
+
+    <p>Что выведено и почему: первый оператор удалил последний
+    отзыв бота (review_id 11) и вернул его номер; второй — строку
+    читателя, тег <code>DELETE 1</code> — «количество удалённых строк»
+    (Outputs, sql-delete). Порядок важен: внешний ключ
+    <code>reviews.reader_id REFERENCES readers</code> (глава 4.2) не дал бы
+    удалить читателя раньше его отзывов. Удаление отзывов при
+    удалении книги сработало бы само — там <code>ON DELETE CASCADE</code>.</p>
+
+    <h2>Опасная версия: без WHERE</h2>
+    <p>Что если опустить WHERE? Для DELETE документация без
+    обиняков: «если WHERE отсутствует, эффект — удаление всех строк
+    таблицы. Результат — корректная, но пустая таблица», а учебник
+    добавляет каноническое предупреждение: «если вы просто напишете
+    <code>DELETE FROM products;</code>, будут удалены все строки таблицы!
+    Caveat programmer» (перевод дословный, 6.3). UPDATE без WHERE
+    аналогично применит SET ко всем строкам. Если цель — очистить
+    таблицу целиком, у SQL есть специальный инструмент: «TRUNCATE
+    предоставляет более быстрый механизм удаления всех строк из
+    таблицы» (Tip, sql-delete); он требует блокировки ACCESS EXCLUSIVE —
+    сильнейшего режима из главы 6.6. Перед
+    массовым изменением в psql полезно сначала выполнить тот же
+    WHERE в SELECT (глава 2.1) и посмотреть, что попадёт под
+    условие.</p>
+
+    <h2>RETURNING: сводка</h2>
+    <p>«Использование RETURNING избавляет от выполнения
+    дополнительного запроса к базе для сбора данных и особенно
+    ценно, когда иначе было бы трудно надёжно идентифицировать
+    изменённые строки» (6.4). Допустимое содержимое — как список
+    вывода SELECT: «оно может содержать имена столбцов целевой
+    таблицы команды или выражения значений с их использованием.
+    Часто используемое сокращение — <code>RETURNING *</code>, выбирающее все
+    столбцы целевой таблицы по порядку». Различие по командам
+    (дословно из 6.4): в INSERT «данные, доступные RETURNING, —
+    строка, как она была вставлена» (включая сгенерированные
+    умолчаниями — глава 5.1), в UPDATE — «новое содержимое
+    изменённой строки», в DELETE — «содержимое удалённой строки».
+    И обязательная пометка о диалекте: RETURNING есть у всех трёх
+    команд, но во всех трёх справочниках Compatibility зафиксировано:
+    «предложения RETURNING [и USING/FROM] являются расширениями
+    PostgreSQL» — в стандарте SQL такой клаузулы нет.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Модератор выполнил <code>UPDATE reviews SET
+      rating = 5 WHERE reader_id = 99;</code> — такого читателя нет.
+      Ошибка или нет? Что вернёт тег команды?</summary>
+      <p><b>Ответ.</b> Не ошибка: «обновление нуля, одной или многих
+      строк... попытка обновления, не совпавшая ни с одной строкой,
+      не является ошибкой» (6.2 dml-update). Тег — <code>UPDATE 0</code>:
+      «если count равен 0, ни одна строка не была обновлена
+      запросом (это не считается ошибкой)» (Outputs, sql-update).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Чем опасен <code>UPDATE ... FROM</code>, если целевая
+      строка соединяется с более чем одной строкой другой таблицы,
+      и как гарантировать безопасность в примере с books?</summary>
+      <p><b>Ответ.</b> «Только одна строка соединения будет
+      использована для обновления целевой строки, но какая именно —
+      не легко предсказуема» (Notes, sql-update). Безопасность даёт
+      соединение по ключу: <code>books.book_id</code> — первичный ключ, поэтому
+      «соединение выдаёт не более одной строки для каждой
+      изменяемой строки».</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Что вернёт RETURNING в UPDATE, INSERT и
+      DELETE соответственно, и почему DELETE ... USING по books
+      удаление возможно, а DELETE FROM readers до удаления отзывов —
+      нет?</summary>
+      <p><b>Ответ.</b> INSERT — «строку, как она была вставлена»,
+      UPDATE — «новое содержимое изменённой строки», DELETE —
+      «содержимое удалённой строки» (6.4). USING формулирует
+      удаление как соединение «по данным другой таблицы» (Notes,
+      sql-delete) и не затрагивает ссылочную целостность; а
+      <code>reviews.reader_id REFERENCES readers</code> (глава 4.2) запрещает
+      удаление строки, на которую есть ссылки, — сначала удаляются
+      отзывы.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="05-01-insert-on-conflict.html">← Предыдущая: 5.1. INSERT и ON CONFLICT</a>
+      <a class="next" href="06-01-transactions-acid.html">Следующий модуль: 6.1. Транзакции и ACID →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/sql-update.html">UPDATE (Description, Outputs, Notes, Compatibility)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-delete.html">DELETE (Description, Outputs, Notes, Compatibility)</a>,
+        <a href="https://www.postgresql.org/docs/17/dml-update.html">Updating Data (6.2)</a>,
+        <a href="https://www.postgresql.org/docs/17/dml-delete.html">Deleting Data (6.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/dml-returning.html">Returning Data from Modified Rows (6.4)</a>.</li>
+      <li>Моргунов Е. П. PostgreSQL. Основы языка SQL. — § 7.2
+        (обновление строк), § 7.3 (удаление строк).
+        <a href="https://edu.postgrespro.ru/sql_primer.pdf">edu.postgrespro.ru/sql_primer.pdf</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System Concepts. 7th ed. — § 3.9 (Modification of the Database).</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

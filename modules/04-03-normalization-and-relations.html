@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 4.3. Связи и нормализация — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="04-03-normalization-and-relations">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m04">Модуль 4. DDL и проектирование</a> /
+    <span aria-current="page">Глава 4.3. Связи и нормализация</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 4.3. Связи и нормализация</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T20 · PostgreSQL 17.11</p>
+
+    <h2>Одна большая таблица, которая разваливается</h2>
+    <p>Первый проект «дневника чтения» кладут в одну таблицу: кто
+    читал, что читал, кто автор, оценка. Через неделю администратору
+    нужно: добавить нового автора, у которого ещё нет прочтений, —
+    <b>нельзя</b>, вставка строки требует и читателя, и оценку;
+    исправить опечатку «Толстй» в фамилии автора — <b>нужно</b>
+    пройтись по всем строкам его книг и легко пропустить одну; удалить
+    последнюю запись о «Войне и мире» — <b>заодно исчезает</b> факт
+    существования книги и её автора. Это классические аномалии
+    вставки, обновления и удаления. Теория реляционного
+    проектирования объясняет их одним словом: в таблице смешаны
+    несколько сущностей, и лечит — нормализацией. Глава — самая
+    теоретическая в учебнике: она отвечает на вопрос «почему схема
+    из четырёх таблиц с внешними ключами, а не одна удобная
+    таблица».</p>
+
+    <pre><code class="language-sql">CREATE TABLE reading_log (
+    reader_email varchar(255) NOT NULL,
+    reader_city  text,
+    book_title   text NOT NULL,
+    author_name  text NOT NULL,
+    rating       smallint,
+    read_on      date
+);
+
+INSERT INTO reading_log VALUES
+    ('anna@example.com', 'Москва', 'Евгений Онегин', 'Пушкин', 5, DATE '2026-10-01'),
+    ('anna@example.com', 'Москва', 'Война и мир', 'Толстой', 4, DATE '2026-10-15'),
+    ('ivan@example.com', 'Казань', 'Война и мир', 'Толстой', 3, DATE '2026-11-02');</code></pre>
+
+    <h2>Сначала связи: 1:N, 1:1, M:N</h2>
+    <p>Связи между сущностями в теории описываются кардинальностями
+    (Silberschatz, гл. 6.4 «Mapping Cardinalities»). В реляционной
+    схеме все три вида выражаются внешними ключами из главы 4.2, но
+    по-разному:</p>
+    <ul>
+      <li><b>1:N</b> («один автор — много книг»): FK на стороне N —
+        <code>books.author_id REFERENCES authors</code>. Столбец внешнего ключа
+        живёт в таблице «многих».</li>
+      <li><b>1:1</b> («один читатель — один профиль»): тот же FK, но
+        с ограничением уникальности на ссылающемся столбце
+        (<code>profile.reader_id UNIQUE REFERENCES readers</code>) —
+        уникальность не даст появиться второму профилю того же
+        читателя.</li>
+      <li><b>M:N</b> («читатели отмечают прочитанные книги с
+        оценкой»): отдельная таблица соединения с двумя внешними
+        ключами. Документация подтверждает паттерн: «у таблицы может
+        быть более одного ограничения внешнего ключа. Это
+        используется для реализации связей многие-к-многим» (5.5.5,
+        <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">/docs/17/ddl-constraints.html</a>).</li>
+    </ul>
+
+    <h2>Функциональные зависимости</h2>
+    <p>Инструмент анализа — функциональная зависимость (ФЗ): «X
+    определяет A» (X → A), если каждому значению X соответствует ровно
+    одно значение A (Silberschatz, гл. 7.2 и 7.4). В нашей таблице
+    читаются три зависимости:</p>
+    <ul>
+      <li><code>reader_email → reader_city</code> (город — свойство читателя);</li>
+      <li><code>book_title → author_name</code> (автор — свойство книги);</li>
+      <li><code>(reader_email, book_title) → rating, read_on</code> (оценка и
+        дата — свойство пары «читатель × книга»).</li>
+    </ul>
+    <p>Ключ таблицы — <code>(reader_email, book_title)</code>; именно он
+    «определяет» строку. Теперь видно, что не так: <code>reader_city</code>
+    зависит от <i>части</i> ключа, а <code>author_name</code> — от набора
+    столбцов, который вообще не является ключом. Нормальные формы —
+    это последовательные запреты на такие ситуации.</p>
+
+    <h2>Первая нормальная форма: атомарные значения</h2>
+    <p>1НФ требует, чтобы каждый столбец хранил атомарное значение, а
+    не список или группу (Silberschatz, гл. 7.8 «Atomic Domains and
+    First Normal Form»). Типичное нарушение 1НФ — ячейка вида
+    <code>&#x27;Евгений Онегин, Война и мир&#x27;</code>: по такому столбцу нельзя ни
+    фильтровать (<code>WHERE book_title = &#x27;Война и мир&#x27;</code> ничего не
+    найдёт), ни соединять с книгами. Ремонт — каждая книга отдельной
+    строкой: так устроена и таблица <code>reading_log</code> выше, и вся
+    реляционная модель из главы 1.1.</p>
+    <p>Уточнение для читателя модуля 3: массивы (<code>text[]</code>) и JSONB
+    нарушают 1НФ <i>формально</i>, но это осознанное решение в тех
+    случаях, когда элемент списка никогда не участвует в связях и
+    ограничениях (теги, настройки). Критерий выбора — глава 3.4/3.5;
+    здесь важно понимать цену: элементы массива не могут быть целью
+    внешнего ключа.</p>
+
+    <h2>Вторая нормальная форма: ничего от «части ключа»</h2>
+    <p>2НФ запрещает зависимость неключевого атрибута от <i>части</i>
+    составного ключа (Silberschatz, гл. 7.3). <code>reader_city</code> зависит
+    только от <code>reader_email</code> — половины ключа. Именно из-за этого
+    возникает аномалия обновления: город Анны размножен по всем её
+    строкам, и исправление требует правки каждой. Ремонт — вынести
+    читателя в собственную таблицу:</p>
+
+    <pre><code class="language-sql">-- читатели уже описаны в главе 4.1: readers(reader_id, email,
+-- display_name, is_active, city, registered_at)
+
+CREATE TABLE reading_log2 (
+    reader_email  varchar(255) NOT NULL REFERENCES readers(email),
+    book_title    text NOT NULL,
+    author_name   text NOT NULL,
+    publisher     text,
+    publisher_city text,
+    rating        smallint,
+    read_on       date,
+    PRIMARY KEY (reader_email, book_title)
+);</code></pre>
+
+    <h2>Третья нормальная форма: ничего транзитивного</h2>
+    <p>3НФ запрещает транзитивные зависимости: неключевой атрибут,
+    зависящий от другого неключевого (Silberschatz, гл. 7.3). В
+    <code>reading_log2</code> она уже есть: <code>publisher_city</code> зависит не от
+    ключа, а от <code>publisher</code> — неключевого атрибута. Полный ключ
+    (reader_email, book_title) определяет книгу, книга — издателя,
+    издатель — город: цепочка «ключ → publisher → publisher_city»
+    и есть транзитивная зависимость, и город издательства
+    размножается по всем прочтениям всех книг этого издателя.
+    Сюда же примыкает остаток нарушения 2НФ: <code>author_name</code> и
+    сам <code>publisher</code> зависят от <code>book_title</code> — части составного
+    ключа. Отсюда аномалии вставки и удаления: нельзя завести
+    автора без прочтения; удалив последнее прочтение книги, теряем
+    связь «книга → автор». Ремонт — вынести издательства, книги
+    и авторов:</p>
+
+    <pre><code class="language-sql">CREATE TABLE authors (
+    author_id integer PRIMARY KEY,
+    name      text NOT NULL
+);
+
+CREATE TABLE publishers (
+    publisher_id integer PRIMARY KEY,
+    name         text NOT NULL,
+    city         text NOT NULL
+);
+
+CREATE TABLE books (
+    book_id     integer PRIMARY KEY,
+    title       text NOT NULL,
+    author_id   integer NOT NULL REFERENCES authors,
+    publisher_id integer NOT NULL REFERENCES publishers
+);
+
+-- таблица соединения — reviews из главы 4.2: book_id и reader_id
+-- (два внешних ключа) плюс атрибуты связи (rating, comment)</code></pre>
+
+    <p>Это и есть сквозная схема учебника: каждая таблица описывает
+    одну сущность, каждая неключевая колонка зависит только от
+    ключа своей таблицы. Аномалии ушли: автор заводится до прочтений
+    (строка в <code>authors</code>), город правится в одном месте (<code>readers</code>),
+    удаление прочтения не затрагивает книги и авторов.</p>
+
+    <h2>Денормализация — осознанно</h2>
+    <p>Нормализация — не догма, а инструмент устранения аномалий
+    (Silberschatz начинает разбор с признаков хорошего и плохого
+    дизайна — гл. 7.1 «Features of Good Relational Designs»).
+    Обратный ход — денормализация — осознанно дублирует данные ради
+    скорости чтения: например, столбец <code>reviews_count</code> прямо в
+    <code>books</code>, чтобы не считать <code>count(*)</code> по отзывам на каждой
+    странице. Цена — возврат аномалии обновления: счётчик надо
+    поддерживать вручную (триггером — глава 10.3 — или приложением),
+    и он может разойтись с истиной. Правило junior-уровня: сначала
+    нормализуй до 3НФ; денормализируй точечно, когда измерения
+    показали проблему (модуль 9 про планы и статистику), а не
+    «на всякий случай». Дальше по теории — BCNF и старшие формы
+    (Silberschatz, гл. 7.5–7.6) — за рамками учебника: на практике
+    3НФ покрывает почти все схемы приложений.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Свяжи каждую аномалию с причиной в схеме
+      reading_log: (а) нельзя добавить автора без книги; (б) опечатка
+      в городе читателя размножена по строкам; (в) удаление последней
+      записи о книге стирает сведения об авторе.</summary>
+      <p><b>Ответ.</b> (а) и (в) — <code>author_name</code> зависит от
+      <code>book_title</code> — части составного ключа (нарушение 2НФ; а
+      <code>publisher_city</code> из текста главы зависел бы ещё и от
+      неключевого <code>publisher</code> — вот это уже 3НФ): автор существует
+      только «внутри» строк прочтений. (б) — <code>reader_city</code> зависит
+      от части составного ключа (нарушение 2НФ), город хранится
+      многократно. Обе проблемы лечатся выносом сущностей: readers
+      (2НФ), books/authors/publishers (2НФ и 3НФ).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Где живёт внешний ключ для связи «один
+      автор — много книг» и какая конструкция превращает её в 1:1?</summary>
+      <p><b>Ответ.</b> В таблице «многих»: <code>books.author_id
+      REFERENCES authors</code> (FK на стороне N). Для 1:1 ссылающийся
+      столбец дополнительно ограничивают UNIQUE (<code>profile.reader_id
+      UNIQUE REFERENCES readers</code>) — вторая строка с тем же
+      reader_id будет отклонена уникальностью.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Почему M:N «читатель × книга» нельзя
+      выразить одним внешним ключом, и что содержит таблица
+      соединения?</summary>
+      <p><b>Ответ.</b> Один FK фиксирует связь строки ровно с одной
+      строкой другой таблицы; M:N требует произвольные комбинации.
+      Таблица соединения (у нас — reviews) хранит по паре внешних
+      ключей на каждую сторону и атрибуты самой связи (rating,
+      comment, created_at); «у таблицы может быть более одного
+      ограничения внешнего ключа — это используется для реализации
+      связей многие-к-многим» (5.5.5).</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="04-02-constraints.html">← Предыдущая: 4.2. Ограничения</a>
+      <a class="next" href="04-04-alter-table-views.html">Следующая: 4.4. ALTER TABLE и представления →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">Constraints (5.5.5 — FK и M:N)</a>.</li>
+      <li>Silberschatz A., Korth H. F., Sudarshan S. Database System
+        Concepts, 7th ed. — гл. 6.4 «Mapping Cardinalities»; гл. 7
+        «Relational Database Design»: 7.1 Features of Good Relational
+        Designs, 7.2 Decomposition Using Functional Dependencies,
+        7.3 Normal Forms, 7.8 Atomic Domains and First Normal Form.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Глава 2.6. Общие табличные выражения (WITH) — Интерактивный учебник по PostgreSQL</title>
+<link rel="stylesheet" href="../css/book.css">
+<link rel="stylesheet" href="../css/vendor/hl-github.min.css">
+<script>(function(){try{var t=null,q=null;try{q=new URLSearchParams(location.search).get('theme')}catch(e){}if(q==='dark'||q==='light'){t=q;try{localStorage.setItem('pgbook-theme',t)}catch(e){}}if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem('pgbook-theme')}catch(e){}}if(t!=='dark'&&t!=='light'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<script src="../js/vendor/highlight.min.js" defer></script>
+<script src="../js/nav.js" defer></script>
+<script src="../js/book.js" defer></script>
+</head>
+<body data-page="02-06-cte-with">
+<header class="topbar">
+  <nav class="breadcrumbs" aria-label="Хлебные крошки">
+    <a href="../index.html">Учебник по PostgreSQL</a> /
+    <a href="../index.html#m02">Модуль 2. Запросы SELECT</a> /
+    <span aria-current="page">Глава 2.6. Общие табличные выражения (WITH)</span>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Навигация по учебнику">
+    <noscript><p class="noscript-note">Для навигации нужен JavaScript. <a href="../index.html">Открыть оглавление</a>.</p></noscript>
+  </aside>
+  <main class="content" id="content">
+    <h1>Глава 2.6. Общие табличные выражения (WITH)</h1>
+    <p class="chapter-meta">Уровень: J · узел карты тем: T09 · PostgreSQL 17.11</p>
+
+    <h2>Подзапрос в подзапросе: читаемость умирает на третьем уровне</h2>
+    <p>Запрос из главы 2.5 — внешний SELECT, внутри подзапрос с GROUP BY.
+    Добавьте ещё шаг (отфильтровать по количеству книг, потом посчитать
+    средний рейтинг по отобранному, потом взять лучших) — и скобки
+    начнут вкладываться в скобки, а имена псевдонимов будут жить только
+    внутри своего фрагмента. SQL-конструкторы решают это
+    последовательным уточнением: сначала «промежуточная таблица 1»,
+    затем «таблица 2 на её основе», затем итоговый запрос. Для этого в
+    SQL есть конструкция WITH — общее табличное выражение (Common
+    Table Expression, CTE). Цель главы — свободно переписывать
+    вложенные подзапросы в цепочку CTE и наоборот.</p>
+
+    <h2>WITH: именованные промежуточные результаты</h2>
+    <p>Документация: «WITH даёт способ писать вспомогательные операторы
+    для использования в большом запросе. Эти операторы, часто называемые
+    общими табличными выражениями или CTE, можно рассматривать как
+    определение временных таблиц, существующих только ради одного
+    запроса» — раздел 7.8 WITH Queries,
+    <a href="https://www.postgresql.org/docs/17/queries-with.html">/docs/17/queries-with.html</a>.
+    «Базовая ценность SELECT в WITH — разбивать сложные запросы на
+    более простые части» (раздел 7.8.1 там же). Внутри WITH могут быть
+    SELECT, INSERT, UPDATE, DELETE и MERGE (7.8; изменяющие данные CTE
+    — тема модуля 5, здесь о них только упоминаем).</p>
+    <p>Запрос из 2.5, переписанный на CTE:</p>
+
+    <pre><code class="language-sql">WITH author_stats AS (
+    SELECT a.name, avg(b.rating) AS avg_rating
+    FROM authors a JOIN books b ON b.author_id = a.author_id
+    GROUP BY a.name
+)
+SELECT name, avg_rating
+FROM author_stats
+WHERE avg_rating >= 4.5
+ORDER BY avg_rating DESC;</code></pre>
+
+    <pre class="sample-output">     name      |     avg_rating
+---------------+--------------------
+ Лев Толстой  | 5.0000000000000000
+ Александр Пушкин | 4.5000000000000000
+(2 rows)</pre>
+
+    <p>Что выведено и почему: результат тот же, что у версии с
+    подзапросом в FROM (глава 2.5): сначала шаг «свернуть книги по
+    авторам», затем шаг «отфильтровать». Отличие — у промежуточного
+    результата появилось имя <code>author_stats</code>, и оба шага читаются
+    сверху вниз. CTE существует до конца одного запроса: это не
+    хранимый объект и не временная таблица между запросами.</p>
+
+    <h2>Цепочки CTE: следующий видит предыдущие</h2>
+    <p>В WITH можно объявить несколько выражений, и каждое следующее
+    может использовать предыдущие — как в примере документации
+    (<code>regional_sales</code>, затем <code>top_regions</code>, затем основной SELECT,
+    раздел 7.8.1). Добавим к нашей задаче шаг «только плодовитые
+    авторы»:</p>
+
+    <pre><code class="language-sql">WITH author_stats AS (
+    SELECT a.author_id, a.name,
+           count(*) AS books_cnt,
+           avg(b.rating) AS avg_rating
+    FROM authors a JOIN books b ON b.author_id = a.author_id
+    GROUP BY a.author_id, a.name
+),
+prolific AS (
+    SELECT * FROM author_stats WHERE books_cnt > 1
+)
+SELECT name, avg_rating
+FROM prolific
+ORDER BY avg_rating DESC;</code></pre>
+
+    <pre class="sample-output">     name      |     avg_rating
+---------------+--------------------
+ Лев Толстой  | 5.0000000000000000
+ Александр Пушкин | 4.5000000000000000
+(2 rows)</pre>
+
+    <p>Что выведено и почему: <code>prolific</code> ссылается на <code>author_stats</code>
+    по имени — как на обычную таблицу; итог тот же, что в 2.5, но теперь
+    каждый шаг — отдельная строка конвейера, и порядок шагов совпадает
+    с порядком чтения. Обратное переписывание — «CTE в подзапрос» —
+    механическое: тело CTE становится подзапросом в FROM следующего
+    шага.</p>
+
+    <h2>Материализация: вычислять CTE отдельно или влить в запрос</h2>
+    <p>Полезное свойство CTE зафиксировано в разделе 7.8.3: «CTE обычно
+    вычисляются один раз на выполнение родительского запроса, даже если
+    на них ссылаются более одного раза. Таким образом, дорогие
+    вычисления, нужные в нескольких местах, можно поместить в CTE, чтобы
+    избежать лишней работы». Но у медали две стороны: «оптимизатор не
+    может протолкнуть ограничения родительского запроса вниз в CTE, на
+    которую ссылаются многократно, — такое CTE вычисляется как
+    написано, без отбрасывания строк, которые родительский запрос потом
+    отбросит» (там же).</p>
+    <p>Поэтому у оптимизатора есть выбор, описанный дословно: «если CTE
+    нерекурсивная и без побочных эффектов (то есть это SELECT без
+    волатильных функций), она может быть влита (folded) в родительский
+    запрос, допуская совместную оптимизацию двух уровней запроса. По
+    умолчанию это происходит, если родительский запрос ссылается на CTE
+    ровно один раз, и не происходит при нескольких ссылках. Решение
+    можно переопределить: MATERIALIZED — принудительно вычислить CTE
+    отдельно, NOT MATERIALIZED — принудительно влить в родительский
+    запрос» (раздел 7.8.3; сами слова-модификаторы MATERIALIZED /
+    NOT MATERIALIZED — расширение PostgreSQL: в стандарте SQL таких
+    опций нет),
+    <a href="https://www.postgresql.org/docs/17/queries-with.html">/docs/17/queries-with.html</a>).</p>
+    <p>Показательный пример из документации (там же):</p>
+
+    <pre><code class="language-sql">WITH w AS (
+    SELECT * FROM big_table
+)
+SELECT * FROM w WHERE key = 123;</code></pre>
+
+    <p>«Это CTE будет влито, давая тот же план выполнения, что и
+    <code>SELECT * FROM big_table WHERE key = 123</code>. В частности,
+    если по key есть индекс, он, вероятно, будет использован, чтобы
+    прочитать только строки с key = 123». А вот при двух ссылках
+    (<code>FROM w AS w1 JOIN w AS w2 ...</code>) CTE «будет
+    материализовано: создастся временная копия big_table, которая затем
+    соединяется сама с собой — без пользы индексов». Это конкретный
+    пример прагматики: слово MATERIALIZED/NOT MATERIALIZED — инструмент
+    управления, когда семантика «вычислить один раз» нужна гарантированно
+    или, наоборот, мешает индексам.</p>
+
+    <h2>Проверь себя</h2>
+
+    <details class="quiz">
+      <summary>Вопрос 1. Чем CTE отличается от временной таблицы и от
+      подзапроса в FROM?</summary>
+      <p><b>Ответ.</b> CTE — «временные таблицы, существующие только
+      ради одного запроса» (7.8): никакой объект схемы не создаётся,
+      данные не переживают конец запроса, имя видно только внутри этого
+      оператора. От подзапроса в FROM отличается синтаксически и
+      читабельностью: несколько шагов получают имена и идут цепочкой,
+      каждый следующий видит предыдущие; семантически одиночный
+      нерекурсивный CTE с одной ссылкой может вычисляться так же
+      (вливание — 7.8.3).</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 2. Когда по умолчанию CTE вливается в родительский
+      запрос, а когда материализуется? Как переопределить?</summary>
+      <p><b>Ответ.</b> Нерекурсивная CTE без побочных эффектов (SELECT
+      без волатильных функций) при <i>одной</i> ссылке из родительского
+      запроса по умолчанию вливается; при нескольких ссылках —
+      материализуется. Переопределяют явно словами MATERIALIZED
+      (принудительно отдельно) и NOT MATERIALIZED (принудительно влить) —
+      раздел 7.8.3
+      <a href="https://www.postgresql.org/docs/17/queries-with.html">/docs/17/queries-with.html</a>.</p>
+    </details>
+
+    <details class="quiz">
+      <summary>Вопрос 3. Перепишите без WITH: <code>WITH t AS (SELECT
+      author_id, count(*) AS c FROM books GROUP BY author_id) SELECT
+      a.name FROM authors a JOIN t ON t.author_id = a.author_id WHERE
+      t.c > 1;</code></summary>
+      <p><b>Ответ.</b> <code>SELECT a.name FROM authors a JOIN (SELECT
+      author_id, count(*) AS c FROM books GROUP BY author_id) AS t ON
+      t.author_id = a.author_id WHERE t.c > 1;</code> — тело CTE стало
+      производной таблицей в FROM с псевдонимом t (правила для
+      подзапросов в FROM — 7.2.1.3). Результат идентичен: Пушкин и
+      Толстой.</p>
+    </details>
+
+    <nav class="chapter-nav">
+      <a class="prev" href="02-05-subqueries.html">← Предыдущая: 2.5. Подзапросы</a>
+      <a class="next" href="02-07-recursive-cte.html">Следующая: 2.7. Рекурсивные CTE →</a>
+    </nav>
+
+    <h2>Источники</h2>
+    <ul>
+      <li>Документация PostgreSQL 17: <a href="https://www.postgresql.org/docs/17/queries-with.html">WITH Queries (Common Table Expressions) (7.8, 7.8.1, 7.8.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">Subqueries in FROM (7.2.1.3)</a>,
+        <a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT (Reference: WITH Clause)</a>.</li>
+    </ul>
+  </main>
+</div>
+</body>
+</html>
